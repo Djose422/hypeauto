@@ -1,12 +1,11 @@
 FROM python:3.12-slim
 
-# Instalar dependencias del sistema para Playwright
+# Dependencias para Chromium headless (Ubuntu 24.04 compatible)
 RUN apt-get update && apt-get install -y \
     wget \
-    gnupg \
     ca-certificates \
     fonts-liberation \
-    libasound2 \
+    libasound2t64 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
     libcups2 \
@@ -20,7 +19,10 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 \
     libxfixes3 \
     libxrandr2 \
+    libxshmfence1 \
     xdg-utils \
+    libu2f-udev \
+    libvulkan1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -28,9 +30,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Instalar navegadores de Playwright
+# Instalar solo Chromium (sin install-deps que falla en Ubuntu 24.04)
 RUN playwright install chromium
-RUN playwright install-deps chromium
 
 COPY . .
 
