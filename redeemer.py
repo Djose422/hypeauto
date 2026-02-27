@@ -69,10 +69,11 @@ class HypeRedeemer:
         self._browser: Optional[Browser] = None
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
         self._initialized = False
-        self._context_pool: asyncio.Queue[BrowserContext] = asyncio.Queue()
+        # Pool de páginas pre-calentadas (context, page)
+        self._page_pool: asyncio.Queue[tuple[BrowserContext, Page]] = asyncio.Queue()
 
     async def initialize(self):
-        """Inicializa el navegador y pre-calienta contextos."""
+        """Inicializa el navegador y pre-calienta páginas con reCAPTCHA."""
         if self._initialized:
             return
         self._playwright = await async_playwright().start()
@@ -91,12 +92,14 @@ class HypeRedeemer:
         )
         self._initialized = True
 
-        # Pre-calentar contextos
-        for _ in range(config.MAX_CONCURRENT):
-            ctx = await self._make_context()
-            await self._context_pool.put(ctx)
+        # Pre-calentar páginas en paralelo
+        warmup_tasks = [self._make_warm_page() for _ in range(config.MAX_CONCURRENT)]
+        pages = await asyncio.gather(*warmup_tasks, return_exceptions=True)
+        for result in pages:
+            if isinstance(result, tuple):
+                await self._page_pool.put(result)
 
-        logger.info(f"Navegador inicializado (headless={config.HEADLESS}, pool={config.MAX_CONCURRENT})")
+        logger.info(f"Navegador inicializado (headless={config.HEADLESS}, pool={self._page_pool.qsize()})")
 
     async def shutdown(self):
         if self._browser:
@@ -122,15 +125,12 @@ class HypeRedeemer:
         # Bloquear recursos innecesarios agresivamente
         async def block_resources(route: Route):
             url = route.request.url
-            # Nunca bloquear recursos críticos
             if any(p in url for p in ALLOW_PATTERNS):
                 await route.continue_()
                 return
-            # Bloquear analytics, portadas, fonts, cookie banner
             if any(p in url for p in BLOCKED_PATTERNS):
                 await route.abort()
                 return
-            # Bloquear imágenes, fonts, media
             resource_type = route.request.resource_type
             if resource_type in ("image", "font", "media"):
                 await route.abort()
@@ -140,24 +140,39 @@ class HypeRedeemer:
         await context.route("**/*", block_resources)
         return context
 
-    async def _get_context(self) -> BrowserContext:
-        """Obtiene un contexto del pool o crea uno nuevo."""
+    async def _make_warm_page(self) -> tuple[BrowserContext, Page]:
+        """Crea una página pre-navegada a la URL base con reCAPTCHA cargado."""
+        context = await self._make_context()
+        page = await context.new_page()
+        page.set_default_timeout(config.REDEEM_TIMEOUT * 1000)
         try:
-            return self._context_pool.get_nowait()
-        except asyncio.QueueEmpty:
-            return await self._make_context()
+            # Pre-cargar la página base para que reCAPTCHA se inicialice
+            await page.goto(config.REDEEM_BASE_URL, wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        return (context, page)
 
-    async def _return_context(self, context: BrowserContext):
-        """Devuelve un contexto al pool o lo cierra si hay exceso."""
+    async def _get_page(self) -> tuple[BrowserContext, Page]:
+        """Obtiene una página del pool o crea una nueva."""
         try:
-            # Limpiar cookies/estado para reusar
-            await context.clear_cookies()
-            if self._context_pool.qsize() < config.MAX_CONCURRENT:
-                await self._context_pool.put(context)
+            return self._page_pool.get_nowait()
+        except asyncio.QueueEmpty:
+            return await self._make_warm_page()
+
+    async def _return_page(self, context: BrowserContext, page: Page):
+        """Devuelve una página al pool tras limpiarla, o la descarta si hay exceso."""
+        try:
+            if self._page_pool.qsize() < config.MAX_CONCURRENT:
+                # Navegar a URL base para re-calentar reCAPTCHA
+                await page.goto(config.REDEEM_BASE_URL, wait_until="domcontentloaded", timeout=10000)
+                await context.clear_cookies()
+                await self._page_pool.put((context, page))
             else:
+                await page.close()
                 await context.close()
         except Exception:
             try:
+                await page.close()
                 await context.close()
             except Exception:
                 pass
@@ -173,14 +188,12 @@ class HypeRedeemer:
         product_name = ""
 
         try:
-            context = await self._get_context()
-            page = await context.new_page()
-            page.set_default_timeout(config.REDEEM_TIMEOUT * 1000)
+            context, page = await self._get_page()
 
             url = f"{config.REDEEM_BASE_URL}/{pin}"
             logger.info(f"[{pin[:8]}...] Navegando a {url}")
 
-            # --- PASO 1: Navegar con domcontentloaded (no esperar imágenes/fonts) ---
+            # --- PASO 1: Navegar al PIN (reCAPTCHA ya está cargado) ---
             await page.goto(url, wait_until="domcontentloaded")
 
             # Esperar a que la tarjeta se voltee (validación automática del PIN)
@@ -331,13 +344,13 @@ class HypeRedeemer:
             return RedeemResult.fail(pin, ErrorType.PAGE_ERROR, error_str, return_pin=True)
 
         finally:
-            if page:
+            if context and page:
+                await self._return_page(context, page)
+            elif page:
                 try:
                     await page.close()
                 except Exception:
                     pass
-            if context:
-                await self._return_context(context)
 
 
 # Instancia global del redeemer
