@@ -8,7 +8,7 @@ import time
 BASE = "http://74.208.193.132:8000"
 API_KEY = "hype-jadh422-2026-secretkey"
 
-PIN = "A680D02B-8E62-451C-91E7-2B030D007190"
+PIN = "2724A994-8D3A-418D-B5E0-2015046AC414"
 GAME_ID = "2643864116"
 
 print(f"Probando PIN: {PIN[:8]}... en {BASE}")

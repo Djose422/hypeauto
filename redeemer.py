@@ -218,14 +218,44 @@ class HypeRedeemer:
 
         try:
             context, page = await self._get_page()
+            logger.info(f"[{pin[:8]}...] Ingresando PIN en página base")
 
-            url = f"{config.REDEEM_BASE_URL}/{pin}"
-            logger.info(f"[{pin[:8]}...] Navegando a {url}")
+            # --- PASO 1: Ingresar PIN en #pininput + click Validar (AJAX, sin navegación) ---
+            pin_input = page.locator("#pininput")
+            try:
+                await pin_input.wait_for(state="visible", timeout=5000)
+            except Exception:
+                # Si el input no aparece, la página no cargó bien — renavegar
+                await page.goto(config.REDEEM_BASE_URL, wait_until="domcontentloaded", timeout=10000)
+                await pin_input.wait_for(state="visible", timeout=5000)
 
-            # --- PASO 1: Navegar al PIN (reCAPTCHA ya está cargado) ---
-            await page.goto(url, wait_until="commit")
+            await pin_input.fill(pin)
 
-            # Esperar a que la tarjeta se voltee (validación automática del PIN)
+            # Esperar a que #btn-validate se habilite
+            btn_validate = page.locator("#btn-validate")
+            for _ in range(30):
+                disabled = await btn_validate.get_attribute("disabled")
+                if disabled is None:
+                    break
+                await asyncio.sleep(0.1)
+
+            # Click Validar e interceptar respuesta /validate
+            try:
+                async with page.expect_response(
+                    lambda r: "/validate" in r.url and "account" not in r.url,
+                    timeout=15000
+                ) as resp_info:
+                    await btn_validate.click()
+                validate_resp = await resp_info.value
+                if validate_resp.status >= 400:
+                    body = await validate_resp.text()
+                    return RedeemResult.fail(pin, ErrorType.PIN_EXPIRED,
+                                             f"Error validando PIN: HTTP {validate_resp.status}",
+                                             return_pin=True)
+            except Exception:
+                pass  # Continuar y esperar card flip
+
+            # Esperar card flip (formulario aparece)
             try:
                 await page.wait_for_selector(".card.back .body", state="visible", timeout=15000)
             except Exception:
@@ -249,7 +279,7 @@ class HypeRedeemer:
                 pass
 
             # --- PASO 2: Llenar TODO de golpe con un solo evaluate ---
-            # Esperar a que el campo GameAccountId esté visible (commit puede ser muy temprano)
+            # Esperar a que el campo GameAccountId esté visible
             try:
                 await page.wait_for_selector("#GameAccountId", state="visible", timeout=5000)
             except Exception:
