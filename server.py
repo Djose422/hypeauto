@@ -105,11 +105,12 @@ async def process_redeem(task_id: str, req: RedeemRequest):
 async def health():
     """Estado del servidor."""
     active = sum(1 for t in tasks.values() if t.status == RedeemStatus.PROCESSING)
+    total_slots = config.BROWSER_COUNT * config.MAX_CONCURRENT
     return HealthResponse(
         status="ok",
         queue_size=queue_size,
         active_tasks=active,
-        max_concurrent=config.MAX_CONCURRENT,
+        max_concurrent=total_slots,
     )
 
 

@@ -66,18 +66,16 @@ class HypeRedeemer:
 
     def __init__(self):
         self._playwright = None
-        self._browser: Optional[Browser] = None
-        self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
+        self._browsers: list[Browser] = []
+        self._total_slots = config.BROWSER_COUNT * config.MAX_CONCURRENT
+        self._semaphore = asyncio.Semaphore(self._total_slots)
         self._initialized = False
-        # Pool de páginas pre-calentadas (context, page)
+        # Pool unificado de páginas pre-calentadas (context, page)
         self._page_pool: asyncio.Queue[tuple[BrowserContext, Page]] = asyncio.Queue()
 
-    async def initialize(self):
-        """Inicializa el navegador y pre-calienta páginas con reCAPTCHA."""
-        if self._initialized:
-            return
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
+    async def _launch_browser(self) -> Browser:
+        """Lanza una instancia de Chromium."""
+        return await self._playwright.chromium.launch(
             headless=config.HEADLESS,
             args=[
                 "--no-sandbox",
@@ -90,28 +88,59 @@ class HypeRedeemer:
                 "--no-first-run",
             ]
         )
+
+    async def initialize(self):
+        """Inicializa los navegadores y pre-calienta páginas con reCAPTCHA."""
+        if self._initialized:
+            return
+        self._playwright = await async_playwright().start()
+
+        # Lanzar N browsers en paralelo
+        browser_tasks = [self._launch_browser() for _ in range(config.BROWSER_COUNT)]
+        browsers = await asyncio.gather(*browser_tasks, return_exceptions=True)
+        for b in browsers:
+            if isinstance(b, Browser):
+                self._browsers.append(b)
+            else:
+                logger.error(f"Error lanzando browser: {b}")
+
+        if not self._browsers:
+            raise RuntimeError("No se pudo lanzar ningún browser")
+
         self._initialized = True
 
-        # Pre-calentar páginas en paralelo
-        warmup_tasks = [self._make_warm_page() for _ in range(config.MAX_CONCURRENT)]
+        # Pre-calentar páginas distribuidas entre los browsers
+        warmup_tasks = []
+        for i in range(self._total_slots):
+            browser = self._browsers[i % len(self._browsers)]
+            warmup_tasks.append(self._make_warm_page(browser))
         pages = await asyncio.gather(*warmup_tasks, return_exceptions=True)
         for result in pages:
             if isinstance(result, tuple):
                 await self._page_pool.put(result)
 
-        logger.info(f"Navegador inicializado (headless={config.HEADLESS}, pool={self._page_pool.qsize()})")
+        logger.info(
+            f"Inicializado: {len(self._browsers)} browsers, "
+            f"pool={self._page_pool.qsize()}/{self._total_slots}, "
+            f"headless={config.HEADLESS}"
+        )
 
     async def shutdown(self):
-        if self._browser:
-            await self._browser.close()
+        for b in self._browsers:
+            try:
+                await b.close()
+            except Exception:
+                pass
+        self._browsers.clear()
         if self._playwright:
             await self._playwright.stop()
         self._initialized = False
         logger.info("Navegador cerrado")
 
-    async def _make_context(self) -> BrowserContext:
+    async def _make_context(self, browser: Optional[Browser] = None) -> BrowserContext:
         """Crea un contexto optimizado con bloqueo de recursos."""
-        context = await self._browser.new_context(
+        b = browser or self._browsers[0]
+        context = await b.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             locale="es-CL",
@@ -140,9 +169,9 @@ class HypeRedeemer:
         await context.route("**/*", block_resources)
         return context
 
-    async def _make_warm_page(self) -> tuple[BrowserContext, Page]:
+    async def _make_warm_page(self, browser: Optional[Browser] = None) -> tuple[BrowserContext, Page]:
         """Crea una página pre-navegada a la URL base con reCAPTCHA cargado."""
-        context = await self._make_context()
+        context = await self._make_context(browser)
         page = await context.new_page()
         page.set_default_timeout(config.REDEEM_TIMEOUT * 1000)
         try:
@@ -162,7 +191,7 @@ class HypeRedeemer:
     async def _return_page(self, context: BrowserContext, page: Page):
         """Devuelve una página al pool tras limpiarla, o la descarta si hay exceso."""
         try:
-            if self._page_pool.qsize() < config.MAX_CONCURRENT:
+            if self._page_pool.qsize() < self._total_slots:
                 # Navegar a URL base para re-calentar reCAPTCHA
                 await page.goto(config.REDEEM_BASE_URL, wait_until="domcontentloaded", timeout=10000)
                 await context.clear_cookies()
@@ -194,7 +223,7 @@ class HypeRedeemer:
             logger.info(f"[{pin[:8]}...] Navegando a {url}")
 
             # --- PASO 1: Navegar al PIN (reCAPTCHA ya está cargado) ---
-            await page.goto(url, wait_until="domcontentloaded")
+            await page.goto(url, wait_until="commit")
 
             # Esperar a que la tarjeta se voltee (validación automática del PIN)
             try:
@@ -307,12 +336,22 @@ class HypeRedeemer:
                     lambda r: "confirm" in r.url, timeout=30000
                 ) as response_info:
                     await page.click("#btn-redeem")
-                await response_info.value
+                confirm_resp = await response_info.value
+                confirm_status = confirm_resp.status
             except Exception:
-                await page.wait_for_timeout(2000)
+                confirm_status = -1
 
-            # --- PASO 5: Verificar resultado ---
-            await page.wait_for_timeout(800)
+            # --- PASO 5: Verificar resultado directamente del response ---
+            if confirm_status == 200:
+                diamonds = parse_diamonds(product_name)
+                logger.success(f"[{pin[:8]}...] EXITOSO -> {nickname} | {diamonds} diamantes")
+                return RedeemResult(
+                    success=True, pin=pin, product_name=product_name,
+                    nickname=nickname, diamonds=diamonds,
+                )
+
+            # Fallback: leer DOM si el status no fue 200
+            await page.wait_for_timeout(300)
             page_text = await page.evaluate("document.body.innerText")
 
             success_keywords = ["exitoso", "sucesso", "success", "entregado",
@@ -321,7 +360,7 @@ class HypeRedeemer:
 
             if any(w in page_text.lower() for w in success_keywords):
                 diamonds = parse_diamonds(product_name)
-                logger.success(f"[{pin[:8]}...] EXITOSO → {nickname} | {diamonds} diamantes")
+                logger.success(f"[{pin[:8]}...] EXITOSO (DOM) -> {nickname} | {diamonds} diamantes")
                 return RedeemResult(
                     success=True, pin=pin, product_name=product_name,
                     nickname=nickname, diamonds=diamonds,

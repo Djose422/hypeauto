@@ -5,7 +5,8 @@ load_dotenv()
 
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "change-me-in-production")
 PORT = int(os.getenv("PORT", "8000"))
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "3"))
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "20"))
+BROWSER_COUNT = int(os.getenv("BROWSER_COUNT", "2"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 REDEEM_TIMEOUT = int(os.getenv("REDEEM_TIMEOUT", "60"))
