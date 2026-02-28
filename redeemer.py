@@ -323,31 +323,55 @@ class HypeRedeemer:
             # Nacionalidad — usar select_option de Playwright (maneja el dropdown nativo)
             await page.select_option("#NationalityAlphaCode", value=config.REDEEM_NATIONALITY)
 
-            # --- PASO 3: Verificar ID ---
+            # --- PASO 3: Verificar ID (con delay + retry) ---
+            await asyncio.sleep(0.3)  # Dar tiempo a Hype para estabilizarse
             logger.info(f"[{pin[:8]}...] Verificando ID: {game_account_id}")
 
-            try:
-                async with page.expect_response(
-                    lambda r: "validate/account" in r.url, timeout=30000
-                ) as response_info:
-                    await page.click("#btn-verify")
+            verify_ok = False
+            for attempt in range(3):
+                try:
+                    if attempt > 0:
+                        # Re-habilitar botón y esperar antes de reintentar
+                        await page.evaluate("document.querySelector('#btn-verify')?.removeAttribute('disabled')")
+                        await asyncio.sleep(0.5)
+                        logger.info(f"[{pin[:8]}...] Retry verify #{attempt + 1}")
 
-                response = await response_info.value
-                response_data = await response.json()
-                logger.info(f"[{pin[:8]}...] Verify: {response_data}")
+                    async with page.expect_response(
+                        lambda r: "validate/account" in r.url, timeout=30000
+                    ) as response_info:
+                        await page.click("#btn-verify")
 
-                if not response_data.get("Success"):
+                    response = await response_info.value
+                    response_data = await response.json()
+                    logger.info(f"[{pin[:8]}...] Verify: {response_data}")
+
+                    if response_data.get("Success"):
+                        verify_ok = True
+                        nickname = response_data.get("Username", "")
+                        break
+
                     error_msg = response_data.get("Message", "Error verificando ID")
+                    # Si es error interno, reintentar
+                    if "interno" in error_msg.lower() or "internal" in error_msg.lower():
+                        logger.warning(f"[{pin[:8]}...] Error interno en verify, reintentando...")
+                        continue
+                    # Error definitivo (ID inválido, etc)
                     return RedeemResult.fail(pin, ErrorType.INVALID_ID, error_msg,
                                              return_pin=True, product_name=product_name)
 
-                nickname = response_data.get("Username", "")
-                logger.info(f"[{pin[:8]}...] Nickname: {nickname}")
+                except Exception as e:
+                    if attempt == 2:
+                        return RedeemResult.fail(pin, ErrorType.TIMEOUT,
+                                                 f"Timeout verificando ID: {str(e)}",
+                                                 return_pin=True, product_name=product_name)
+                    continue
 
-            except Exception as e:
-                return RedeemResult.fail(pin, ErrorType.TIMEOUT,
-                                         f"Timeout verificando ID: {str(e)}",
+            if not verify_ok:
+                return RedeemResult.fail(pin, ErrorType.INVALID_ID,
+                                         "Error verificando ID tras 3 intentos",
                                          return_pin=True, product_name=product_name)
+
+            logger.info(f"[{pin[:8]}...] Nickname: {nickname}")
 
             # --- PASO 4: Canjear ---
             logger.info(f"[{pin[:8]}...] Canjeando...")
