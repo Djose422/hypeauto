@@ -231,13 +231,8 @@ class HypeRedeemer:
 
             await pin_input.fill(pin)
 
-            # Esperar a que #btn-validate se habilite
-            btn_validate = page.locator("#btn-validate")
-            for _ in range(30):
-                disabled = await btn_validate.get_attribute("disabled")
-                if disabled is None:
-                    break
-                await asyncio.sleep(0.1)
+            # Habilitar y clickear #btn-validate directamente
+            await page.evaluate("document.querySelector('#btn-validate')?.removeAttribute('disabled')")
 
             # Click Validar e interceptar respuesta /validate
             try:
@@ -245,7 +240,7 @@ class HypeRedeemer:
                     lambda r: "/validate" in r.url and "account" not in r.url,
                     timeout=15000
                 ) as resp_info:
-                    await btn_validate.click()
+                    await page.click("#btn-validate")
                 validate_resp = await resp_info.value
                 if validate_resp.status >= 400:
                     body = await validate_resp.text()
