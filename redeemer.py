@@ -249,6 +249,11 @@ class HypeRedeemer:
                 pass
 
             # --- PASO 2: Llenar TODO de golpe con un solo evaluate ---
+            # Esperar a que el campo GameAccountId esté visible (commit puede ser muy temprano)
+            try:
+                await page.wait_for_selector("#GameAccountId", state="visible", timeout=5000)
+            except Exception:
+                pass
             logger.info(f"[{pin[:8]}...] Llenando formulario...")
 
             fill_ok = await page.evaluate("""(args) => {

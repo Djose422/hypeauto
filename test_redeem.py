@@ -1,22 +1,27 @@
-import httpx
+import sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+import requests
 import time
-import sys
 
-sys.stdout.reconfigure(encoding='utf-8')
+# Cambiar a VPS o localhost
+BASE = "http://74.208.193.132:8000"
+API_KEY = "hype-jadh422-2026-secretkey"
 
-start = time.time()
-r = httpx.post('http://localhost:8000/redeem/sync',
-    headers={'X-Api-Key': 'test-key-local', 'Content-Type': 'application/json'},
-    json={
-        'pin': '0271EF36-63A1-459D-95CD-63A5E55F591D',
-        'game_account_id': '2643864116',
-        'order_id': 'TEST-003'
-    },
-    timeout=120
+PIN = "A680D02B-8E62-451C-91E7-2B030D007190"
+GAME_ID = "2643864116"
+
+print(f"Probando PIN: {PIN[:8]}... en {BASE}")
+t = time.time()
+r = requests.post(
+    f"{BASE}/redeem/sync",
+    json={"pin": PIN, "game_account_id": GAME_ID},
+    headers={"X-Api-Key": API_KEY},
+    timeout=60,
 )
-elapsed = time.time() - start
-
+elapsed = time.time() - t
 data = r.json()
-print(f"Tiempo: {elapsed:.2f}s")
+print(f"Status: {r.status_code}")
+print(f"Tiempo total (incluye red): {elapsed:.2f}s")
 for k, v in data.items():
     print(f"  {k}: {v}")
