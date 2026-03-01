@@ -43,6 +43,7 @@ class RedeemResponse(BaseModel):
     error: ErrorType = ErrorType.NONE
     error_message: str = ""
     return_pin: bool = False
+    redeem_duration_ms: int = 0
 
 
 class HealthResponse(BaseModel):

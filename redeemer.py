@@ -11,7 +11,7 @@ from models import ErrorType
 class RedeemResult:
     def __init__(self, success: bool, pin: str, error: ErrorType = ErrorType.NONE,
                  error_message: str = "", product_name: str = "", nickname: str = "",
-                 diamonds: int = 0, return_pin: bool = False):
+                 diamonds: int = 0, return_pin: bool = False, redeem_duration_ms: int = 0):
         self.success = success
         self.pin = pin
         self.error = error
@@ -20,6 +20,7 @@ class RedeemResult:
         self.nickname = nickname
         self.diamonds = diamonds
         self.return_pin = return_pin
+        self.redeem_duration_ms = redeem_duration_ms
         self.redeemed_at = datetime.now(timezone.utc).isoformat() if success else ""
 
     @staticmethod
@@ -208,7 +209,11 @@ class HypeRedeemer:
 
     async def redeem_pin(self, pin: str, game_account_id: str) -> RedeemResult:
         async with self._semaphore:
-            return await self._do_redeem(pin, game_account_id)
+            import time as _time
+            t0 = _time.monotonic()
+            result = await self._do_redeem(pin, game_account_id)
+            result.redeem_duration_ms = int((_time.monotonic() - t0) * 1000)
+            return result
 
     async def _do_redeem(self, pin: str, game_account_id: str) -> RedeemResult:
         context = None

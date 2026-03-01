@@ -68,6 +68,7 @@ def _build_response(task_id: str, req: RedeemRequest, result) -> RedeemResponse:
         error=result.error,
         error_message=result.error_message,
         return_pin=result.return_pin,
+        redeem_duration_ms=getattr(result, 'redeem_duration_ms', 0),
     )
 
 
