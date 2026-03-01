@@ -221,6 +221,7 @@ class HypeRedeemer:
         nickname = ""
         product_name = ""
 
+        redeem_clicked = False  # Flag: True after redeem button clicked (PIN possibly consumed)
         try:
             context, page = await self._get_page()
             logger.info(f"[{pin[:8]}...] Ingresando PIN en página base")
@@ -395,9 +396,11 @@ class HypeRedeemer:
                     lambda r: "confirm" in r.url, timeout=30000
                 ) as response_info:
                     await page.click("#btn-redeem")
+                    redeem_clicked = True  # PIN potentially consumed from this point
                 confirm_resp = await response_info.value
                 confirm_status = confirm_resp.status
             except Exception:
+                redeem_clicked = True  # Click may have been sent
                 confirm_status = -1
 
             # --- PASO 5: Verificar resultado directamente del response ---
@@ -410,20 +413,23 @@ class HypeRedeemer:
                 )
 
             # Fallback: leer DOM si el status no fue 200
-            await page.wait_for_timeout(300)
-            page_text = await page.evaluate("document.body.innerText")
+            try:
+                await page.wait_for_timeout(300)
+                page_text = await page.evaluate("document.body.innerText")
 
-            success_keywords = ["exitoso", "sucesso", "success", "entregado",
-                                "delivered", "créditos", "creditos", "diamantes",
-                                "completado", "realizado"]
+                success_keywords = ["exitoso", "sucesso", "success", "entregado",
+                                    "delivered", "créditos", "creditos", "diamantes",
+                                    "completado", "realizado"]
 
-            if any(w in page_text.lower() for w in success_keywords):
-                diamonds = parse_diamonds(product_name)
-                logger.success(f"[{pin[:8]}...] EXITOSO (DOM) -> {nickname} | {diamonds} diamantes")
-                return RedeemResult(
-                    success=True, pin=pin, product_name=product_name,
-                    nickname=nickname, diamonds=diamonds,
-                )
+                if any(w in page_text.lower() for w in success_keywords):
+                    diamonds = parse_diamonds(product_name)
+                    logger.success(f"[{pin[:8]}...] EXITOSO (DOM) -> {nickname} | {diamonds} diamantes")
+                    return RedeemResult(
+                        success=True, pin=pin, product_name=product_name,
+                        nickname=nickname, diamonds=diamonds,
+                    )
+            except Exception as dom_err:
+                logger.warning(f"[{pin[:8]}...] Error leyendo DOM post-redeem: {dom_err}")
 
             try:
                 await page.screenshot(path=f"debug_{pin[:8]}.png", full_page=True)
@@ -437,6 +443,10 @@ class HypeRedeemer:
         except Exception as e:
             error_str = str(e)
             logger.error(f"[{pin[:8]}...] Error: {error_str}")
+            if redeem_clicked:
+                logger.warning(f"[{pin[:8]}...] Exception AFTER redeem click — assuming PIN consumed, return_pin=False")
+                return RedeemResult.fail(pin, ErrorType.UNKNOWN, error_str,
+                                         return_pin=False, product_name=product_name)
             if "timeout" in error_str.lower():
                 return RedeemResult.fail(pin, ErrorType.TIMEOUT, error_str, return_pin=True)
             return RedeemResult.fail(pin, ErrorType.PAGE_ERROR, error_str, return_pin=True)
