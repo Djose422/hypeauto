@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
 from loguru import logger
 
 import config
-from models import RedeemRequest, RedeemResponse, RedeemStatus, ErrorType, HealthResponse
+from models import RedeemRequest, RedeemResponse, RedeemStatus, ErrorType, HealthResponse, VerifyPinRequest, VerifyPinResponse
 from redeemer import redeemer
 
 
@@ -176,6 +176,18 @@ async def get_task(task_id: str, x_api_key: str = Header(...)):
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Tarea no encontrada")
     return tasks[task_id]
+
+
+@app.post("/verify_pin", response_model=VerifyPinResponse)
+async def verify_pin(req: VerifyPinRequest, x_api_key: str = Header(...)):
+    """Verifica si un PIN fue canjeado sin redimirlo.
+    Ingresa el PIN en la página de Hype y lee el resultado de validación.
+    No llena game ID ni canjea.
+    """
+    verify_api_key(x_api_key)
+    logger.info(f"[verify] Verificando PIN {req.pin[:8]}...")
+    result = await redeemer.verify_pin(req.pin)
+    return VerifyPinResponse(**result)
 
 
 @app.post("/redeem/batch", response_model=list[RedeemResponse])
