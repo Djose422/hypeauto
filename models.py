@@ -46,19 +46,6 @@ class RedeemResponse(BaseModel):
     redeem_duration_ms: int = 0
 
 
-class VerifyPinRequest(BaseModel):
-    """Petición para verificar si un PIN fue canjeado, sin redimirlo."""
-    pin: str = Field(..., description="Código PIN a verificar")
-
-
-class VerifyPinResponse(BaseModel):
-    """Resultado de verificación de PIN."""
-    pin_used: bool = Field(description="True si el PIN ya fue canjeado o expiró")
-    pin_valid: bool = Field(description="True si el PIN es válido y no canjeado")
-    detail: str = Field(default="", description="Detalle del estado (producto, error, etc)")
-    error: bool = Field(default=False, description="True si hubo error al verificar")
-
-
 class HealthResponse(BaseModel):
     status: str
     queue_size: int
