@@ -201,6 +201,17 @@ class HypeRedeemer:
             page.set_default_timeout(config.REDEEM_TIMEOUT * 1000)
             logger.info(f"[{pin[:8]}...] Navegando a página base...")
             await page.goto(config.REDEEM_BASE_URL, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(0.5)  # Cloudflare Rocket Loader
+
+            # Esperar a que reCAPTCHA esté disponible
+            for _ in range(20):
+                recaptcha_ready = await page.evaluate(
+                    "() => typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.execute === 'function'"
+                )
+                if recaptcha_ready:
+                    break
+                await asyncio.sleep(0.3)
+            logger.info(f"[{pin[:8]}...] reCAPTCHA listo: {recaptcha_ready}")
 
             # --- PASO 1: Ingresar PIN en #pininput + click Validar (AJAX, sin navegación) ---
             pin_input = page.locator("#pininput")
@@ -213,8 +224,14 @@ class HypeRedeemer:
 
             await pin_input.fill(pin)
 
-            # Habilitar y clickear #btn-validate directamente
-            await page.evaluate("document.querySelector('#btn-validate')?.removeAttribute('disabled')")
+            # Esperar a que btn-validate se habilite naturalmente (reCAPTCHA lo activa)
+            btn_validate = page.locator("#btn-validate")
+            await btn_validate.wait_for(state="visible", timeout=10000)
+            for _ in range(30):
+                disabled = await btn_validate.get_attribute("disabled")
+                if disabled is None:
+                    break
+                await asyncio.sleep(0.15)
 
             # Click Validar e interceptar respuesta /validate
             try:
