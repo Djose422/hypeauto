@@ -1,6 +1,6 @@
 import re
 import asyncio
-from typing import Optional
+from typing import Optional  # kept for future use
 from datetime import datetime, timezone
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Route
 from loguru import logger
@@ -65,89 +65,92 @@ def parse_diamonds(product_name: str) -> int:
 class HypeRedeemer:
     """Motor de redención de PINs de Hype Games usando Playwright."""
 
+    BROWSER_ARGS = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-images",
+        "--disable-extensions",
+        "--disable-default-apps",
+        "--no-first-run",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--disable-background-networking",
+        "--disable-sync",
+        "--disable-translate",
+        "--disable-component-update",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--metrics-recording-only",
+        "--no-default-browser-check",
+    ]
+
     def __init__(self):
         self._playwright = None
-        self._browsers: list[Browser] = []
-        self._total_slots = config.BROWSER_COUNT * config.MAX_CONCURRENT
-        self._semaphore = asyncio.Semaphore(self._total_slots)
+        self._browser: Browser | None = None
+        self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
         self._initialized = False
-        # Pool unificado de páginas pre-calentadas (context, page)
-        self._page_pool: asyncio.Queue[tuple[BrowserContext, Page]] = asyncio.Queue()
 
     async def _launch_browser(self) -> Browser:
         """Lanza una instancia de Chromium."""
         return await self._playwright.chromium.launch(
             headless=config.HEADLESS,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-images",
-                "--disable-extensions",
-                "--disable-default-apps",
-                "--no-first-run",
-                "--disable-gpu",
-                "--disable-software-rasterizer",
-                "--disable-background-networking",
-                "--disable-sync",
-                "--disable-translate",
-                "--metrics-recording-only",
-                "--no-default-browser-check",
-            ]
+            args=self.BROWSER_ARGS,
         )
 
+    async def _ensure_browser(self):
+        """Garantiza que el browser esté vivo. Lo reinicia si crasheó."""
+        try:
+            if self._browser and self._browser.is_connected():
+                return
+        except Exception:
+            pass
+        logger.warning("Browser caído, reiniciando...")
+        try:
+            if self._browser:
+                await self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._playwright:
+                await self._playwright.stop()
+        except Exception:
+            pass
+        self._playwright = await async_playwright().start()
+        self._browser = await self._launch_browser()
+        logger.info("Browser reiniciado ✓")
+
     async def initialize(self):
-        """Inicializa los navegadores y pre-calienta páginas con reCAPTCHA."""
+        """Inicializa el navegador (sin pre-calentar páginas)."""
         if self._initialized:
             return
         self._playwright = await async_playwright().start()
-
-        # Lanzar N browsers en paralelo
-        browser_tasks = [self._launch_browser() for _ in range(config.BROWSER_COUNT)]
-        browsers = await asyncio.gather(*browser_tasks, return_exceptions=True)
-        for b in browsers:
-            if isinstance(b, Browser):
-                self._browsers.append(b)
-            else:
-                logger.error(f"Error lanzando browser: {b}")
-
-        if not self._browsers:
-            raise RuntimeError("No se pudo lanzar ningún browser")
-
+        self._browser = await self._launch_browser()
         self._initialized = True
 
-        # Pre-calentar páginas distribuidas entre los browsers
-        warmup_tasks = []
-        for i in range(self._total_slots):
-            browser = self._browsers[i % len(self._browsers)]
-            warmup_tasks.append(self._make_warm_page(browser))
-        pages = await asyncio.gather(*warmup_tasks, return_exceptions=True)
-        for result in pages:
-            if isinstance(result, tuple):
-                await self._page_pool.put(result)
-
         logger.info(
-            f"Inicializado: {len(self._browsers)} browsers, "
-            f"pool={self._page_pool.qsize()}/{self._total_slots}, "
+            f"Inicializado: 1 browser, "
+            f"max_concurrent={config.MAX_CONCURRENT}, "
             f"headless={config.HEADLESS}"
         )
 
     async def shutdown(self):
-        for b in self._browsers:
-            try:
-                await b.close()
-            except Exception:
-                pass
-        self._browsers.clear()
+        try:
+            if self._browser:
+                await self._browser.close()
+        except Exception:
+            pass
+        self._browser = None
         if self._playwright:
             await self._playwright.stop()
         self._initialized = False
         logger.info("Navegador cerrado")
 
-    async def _make_context(self, browser: Optional[Browser] = None) -> BrowserContext:
+    async def _make_context(self) -> BrowserContext:
         """Crea un contexto optimizado con bloqueo de recursos."""
-        b = browser or self._browsers[0]
+        await self._ensure_browser()
+        b = self._browser
         context = await b.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -177,43 +180,6 @@ class HypeRedeemer:
         await context.route("**/*", block_resources)
         return context
 
-    async def _make_warm_page(self, browser: Optional[Browser] = None) -> tuple[BrowserContext, Page]:
-        """Crea una página pre-navegada a la URL base con reCAPTCHA cargado."""
-        context = await self._make_context(browser)
-        page = await context.new_page()
-        page.set_default_timeout(config.REDEEM_TIMEOUT * 1000)
-        try:
-            # Pre-cargar la página base para que reCAPTCHA se inicialice
-            await page.goto(config.REDEEM_BASE_URL, wait_until="domcontentloaded", timeout=15000)
-        except Exception:
-            pass
-        return (context, page)
-
-    async def _get_page(self) -> tuple[BrowserContext, Page]:
-        """Obtiene una página del pool o crea una nueva."""
-        try:
-            return self._page_pool.get_nowait()
-        except asyncio.QueueEmpty:
-            return await self._make_warm_page()
-
-    async def _return_page(self, context: BrowserContext, page: Page):
-        """Devuelve una página al pool tras limpiarla, o la descarta si hay exceso."""
-        try:
-            if self._page_pool.qsize() < self._total_slots:
-                # Navegar a URL base para re-calentar reCAPTCHA
-                await page.goto(config.REDEEM_BASE_URL, wait_until="domcontentloaded", timeout=10000)
-                await context.clear_cookies()
-                await self._page_pool.put((context, page))
-            else:
-                await page.close()
-                await context.close()
-        except Exception:
-            try:
-                await page.close()
-                await context.close()
-            except Exception:
-                pass
-
     async def redeem_pin(self, pin: str, game_account_id: str) -> RedeemResult:
         async with self._semaphore:
             import time as _time
@@ -230,8 +196,11 @@ class HypeRedeemer:
 
         redeem_clicked = False  # Flag: True after redeem button clicked (PIN possibly consumed)
         try:
-            context, page = await self._get_page()
-            logger.info(f"[{pin[:8]}...] Ingresando PIN en página base")
+            context = await self._make_context()
+            page = await context.new_page()
+            page.set_default_timeout(config.REDEEM_TIMEOUT * 1000)
+            logger.info(f"[{pin[:8]}...] Navegando a página base...")
+            await page.goto(config.REDEEM_BASE_URL, wait_until="domcontentloaded", timeout=15000)
 
             # --- PASO 1: Ingresar PIN en #pininput + click Validar (AJAX, sin navegación) ---
             pin_input = page.locator("#pininput")
@@ -459,11 +428,9 @@ class HypeRedeemer:
             return RedeemResult.fail(pin, ErrorType.PAGE_ERROR, error_str, return_pin=True)
 
         finally:
-            if context and page:
-                await self._return_page(context, page)
-            elif page:
+            if context:
                 try:
-                    await page.close()
+                    await context.close()
                 except Exception:
                     pass
 
