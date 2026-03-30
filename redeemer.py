@@ -87,6 +87,13 @@ class HypeRedeemer:
                 "--disable-extensions",
                 "--disable-default-apps",
                 "--no-first-run",
+                "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--disable-translate",
+                "--metrics-recording-only",
+                "--no-default-browser-check",
             ]
         )
 
