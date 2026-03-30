@@ -204,6 +204,7 @@ class HypeRedeemer:
             await asyncio.sleep(0.5)  # Cloudflare Rocket Loader
 
             # Esperar a que reCAPTCHA esté disponible
+            recaptcha_ready = False
             for _ in range(20):
                 recaptcha_ready = await page.evaluate(
                     "() => typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.execute === 'function'"
@@ -232,6 +233,9 @@ class HypeRedeemer:
                 if disabled is None:
                     break
                 await asyncio.sleep(0.15)
+            else:
+                # Fallback: forzar habilitación si reCAPTCHA no lo hizo
+                await page.evaluate("document.querySelector('#btn-validate')?.removeAttribute('disabled')")
 
             # Click Validar e interceptar respuesta /validate
             try:

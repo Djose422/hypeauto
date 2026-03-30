@@ -1,4 +1,5 @@
 import uuid
+import time
 from contextlib import asynccontextmanager
 from typing import Dict
 
@@ -13,7 +14,9 @@ from redeemer import redeemer
 
 # --- Estado en memoria ---
 tasks: Dict[str, RedeemResponse] = {}
+task_timestamps: Dict[str, float] = {}  # task_id -> time.time()
 queue_size = 0
+TASK_TTL = 600  # 10 minutos
 
 
 # --- Lifecycle ---
@@ -136,6 +139,10 @@ async def redeem(req: RedeemRequest, background_tasks: BackgroundTasks,
         order_id=req.order_id,
     )
     tasks[task_id] = task_response
+    task_timestamps[task_id] = time.time()
+
+    # Limpiar tareas antiguas
+    _cleanup_old_tasks()
 
     background_tasks.add_task(process_redeem, task_id, req)
 
@@ -203,6 +210,19 @@ async def redeem_batch(requests: list[RedeemRequest],
 
     logger.info(f"Batch de {len(requests)} redenciones encoladas")
     return responses
+
+
+def _cleanup_old_tasks():
+    """Elimina tareas completadas con más de TASK_TTL segundos."""
+    now = time.time()
+    expired = [
+        tid for tid, ts in task_timestamps.items()
+        if now - ts > TASK_TTL and tid in tasks
+        and tasks[tid].status in (RedeemStatus.SUCCESS, RedeemStatus.FAILED)
+    ]
+    for tid in expired:
+        tasks.pop(tid, None)
+        task_timestamps.pop(tid, None)
 
 
 if __name__ == "__main__":
