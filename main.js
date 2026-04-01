@@ -165,11 +165,38 @@ const redeemSemaphore = new Semaphore(CONFIG.MAX_CONCURRENT);
 let browser;
 let browserLaunchPromise = null;
 
+function findChromiumPath() {
+    const fs = require('fs');
+    const path = require('path');
+    const cacheDir = path.join(process.env.HOME || '/root', '.cache', 'ms-playwright');
+    // Buscar chromium regular (no headless shell)
+    try {
+        const dirs = fs.readdirSync(cacheDir).filter(d => /^chromium-\d+$/.test(d)).sort();
+        for (const dir of dirs.reverse()) {
+            const candidates = [
+                path.join(cacheDir, dir, 'chrome-linux', 'chrome'),
+                path.join(cacheDir, dir, 'chrome-linux64', 'chrome'),
+                path.join(cacheDir, dir, 'chrome-linux', 'headless_shell'),
+            ];
+            for (const p of candidates) {
+                if (fs.existsSync(p)) return p;
+            }
+        }
+    } catch {}
+    return null;
+}
+
 async function launchBrowser() {
-    browser = await chromium.launch({
+    const execPath = findChromiumPath();
+    const launchOpts = {
         headless: CONFIG.HEADLESS,
         args: BROWSER_ARGS,
-    });
+    };
+    if (execPath) {
+        launchOpts.executablePath = execPath;
+        fastify.log.info({ executablePath: execPath }, 'Usando Chromium regular (sin SwiftShader)');
+    }
+    browser = await chromium.launch(launchOpts);
     fastify.log.info({ maxConcurrent: CONFIG.MAX_CONCURRENT }, 'Chromium listo');
     return browser;
 }
