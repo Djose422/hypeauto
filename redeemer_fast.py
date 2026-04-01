@@ -484,16 +484,17 @@ class HypeFastRedeemer:
             args=BROWSER_ARGS,
         )
 
-        # Solo crear 1 slot al inicio. Los demás se crean bajo demanda.
-        slot = RedeemSlot(0)
-        await slot.setup(self._browser)
-        self._slots.append(slot)
-        logger.info("Slot 1 listo ✓ (máx bajo demanda: %d)", config.MAX_CONCURRENT)
+        # Pre-cargar TODOS los slots para que cada canje sea rápido (~3s)
+        for i in range(config.MAX_CONCURRENT):
+            slot = RedeemSlot(i)
+            await slot.setup(self._browser)
+            self._slots.append(slot)
+            logger.info(f"Slot {i + 1}/{config.MAX_CONCURRENT} listo ✓")
 
         self._initialized = True
         logger.info(
-            f"HypeFastRedeemer inicializado: 1 slot activo, "
-            f"max_concurrent={config.MAX_CONCURRENT}, headless={config.HEADLESS}"
+            f"HypeFastRedeemer inicializado: {config.MAX_CONCURRENT} slots activos, "
+            f"headless={config.HEADLESS}"
         )
 
     async def shutdown(self):
