@@ -9,7 +9,13 @@ from loguru import logger
 
 import config
 from models import RedeemRequest, RedeemResponse, RedeemStatus, ErrorType, HealthResponse
-from redeemer import redeemer
+
+if config.USE_HTTP_REDEEMER:
+    from redeemer_fast import redeemer
+    logger.info("Usando redeemer Fast (AJAX directo, páginas persistentes)")
+else:
+    from redeemer import redeemer
+    logger.info("Usando redeemer Playwright (browser completo)")
 
 
 # --- Estado en memoria ---

@@ -12,6 +12,7 @@ HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 REDEEM_TIMEOUT = int(os.getenv("REDEEM_TIMEOUT", "60"))
 
 REDEEM_BASE_URL = "https://redeem.hype.games"
+USE_HTTP_REDEEMER = os.getenv("USE_HTTP_REDEEMER", "true").lower() == "true"
 
 # Datos fijos para el formulario de redención (no los proporciona el cliente)
 REDEEM_NAME = os.getenv("REDEEM_NAME", "Juan Perez")
