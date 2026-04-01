@@ -363,7 +363,7 @@ class RedeemSlot:
         await self._navigate()
 
     async def _navigate(self):
-        """Navega a la página y espera reCAPTCHA."""
+        """Navega a la página, espera reCAPTCHA y hace warm-up de conexiones."""
         await self.page.goto(config.REDEEM_BASE_URL, wait_until="domcontentloaded", timeout=15000)
         await asyncio.sleep(0.5)
 
@@ -375,6 +375,24 @@ class RedeemSlot:
                 break
             await asyncio.sleep(0.3)
 
+        # Warm-up: generar un token reCAPTCHA para calentar conexiones a Google
+        try:
+            await self.page.evaluate("""
+                () => {
+                    const sdk = (typeof ajaxConfig !== 'undefined' && ajaxConfig.captchaEnterpriseEnabled)
+                        ? grecaptcha.enterprise : grecaptcha;
+                    sdk.ready(() => {
+                        sdk.execute(
+                            (typeof ajaxConfig !== 'undefined') ? ajaxConfig.captchaPublicKey : '6Lf_DWEpAAAAAEg4rjruIXopl29ai0v9o6Vafx0A',
+                            { action: 'KEY_REDEEM' }
+                        );
+                    });
+                }
+            """)
+            await asyncio.sleep(1)  # Esperar a que el token se genere y las conexiones se establezcan
+        except Exception:
+            pass
+
         self.ready = True
         self.use_count = 0
 
@@ -382,8 +400,8 @@ class RedeemSlot:
         """Ejecuta el flujo completo de redención vía AJAX dentro de la página."""
         product_name = ""
         try:
-            # Cada 10 usos, recargar para evitar memory leaks
-            if self.use_count >= 10:
+            # Cada 50 usos, recargar para evitar memory leaks
+            if self.use_count >= 50:
                 logger.info(f"[Slot {self.index}] Recargando página (uso #{self.use_count})...")
                 await self._navigate()
 
