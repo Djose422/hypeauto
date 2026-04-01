@@ -1060,15 +1060,18 @@ fastify.addHook('onClose', async () => {
     await closeBrowser();
 });
 
-function killGpuProcess() {
+function freezeGpuProcess() {
+    // SIGSTOP congela el proceso: Chromium cree que sigue vivo (no lo respawnea)
+    // pero usa 0% CPU. Mejor que matarlo (pkill) porque Chromium lo respawnea.
     const { execSync } = require('child_process');
     try {
-        execSync("pkill -f 'type=gpu-process' 2>/dev/null || true", { stdio: 'ignore' });
-        fastify.log.info('Proceso GPU (SwiftShader) eliminado');
+        const result = execSync("pgrep -f 'type=gpu-process'", { encoding: 'utf8' }).trim();
+        if (result) {
+            execSync(`kill -STOP ${result.split('\\n').join(' ')}`, { stdio: 'ignore' });
+            fastify.log.info({ pids: result.split('\\n') }, 'GPU process congelado (SIGSTOP)');
+        }
     } catch {}
 }
-
-let gpuKillerInterval;
 
 async function start() {
     try {
@@ -1076,11 +1079,9 @@ async function start() {
         await fillPool();
         fastify.log.info({ poolSize: pagePool.length }, 'Pool de páginas listo');
 
-        // Matar el proceso GPU que Playwright fuerza con SwiftShader (~95% CPU)
-        // Las páginas funcionan sin él porque WebGL/GPU están deshabilitados
-        killGpuProcess();
-        // Re-matar cada 30s por si Chromium lo respawnea
-        gpuKillerInterval = setInterval(killGpuProcess, 30000);
+        // Congelar (SIGSTOP) el GPU process de SwiftShader (~95% CPU)
+        // Queda vivo pero frozen → 0% CPU, Chromium no lo respawnea
+        setTimeout(freezeGpuProcess, 2000);
 
         await fastify.listen({ port: CONFIG.PORT, host: '0.0.0.0' });
     } catch (err) {
@@ -1091,7 +1092,6 @@ async function start() {
 
 async function shutdown(signal) {
     fastify.log.info({ signal }, 'Cerrando HypeAuto...');
-    if (gpuKillerInterval) clearInterval(gpuKillerInterval);
     try { await fastify.close(); process.exit(0); }
     catch { process.exit(1); }
 }
