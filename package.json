@@ -1,0 +1,17 @@
+{
+  "name": "hypeauto",
+  "version": "2.0.0",
+  "private": true,
+  "description": "HypeAuto - Redención automática de PINs (Node.js + Playwright)",
+  "main": "main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node main.js",
+    "dev": "node --watch main.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "fastify": "^5.6.1",
+    "playwright": "^1.55.1"
+  }
+}
