@@ -1060,11 +1060,28 @@ fastify.addHook('onClose', async () => {
     await closeBrowser();
 });
 
+function killGpuProcess() {
+    const { execSync } = require('child_process');
+    try {
+        execSync("pkill -f 'type=gpu-process' 2>/dev/null || true", { stdio: 'ignore' });
+        fastify.log.info('Proceso GPU (SwiftShader) eliminado');
+    } catch {}
+}
+
+let gpuKillerInterval;
+
 async function start() {
     try {
         await ensureBrowser();
         await fillPool();
         fastify.log.info({ poolSize: pagePool.length }, 'Pool de páginas listo');
+
+        // Matar el proceso GPU que Playwright fuerza con SwiftShader (~95% CPU)
+        // Las páginas funcionan sin él porque WebGL/GPU están deshabilitados
+        killGpuProcess();
+        // Re-matar cada 30s por si Chromium lo respawnea
+        gpuKillerInterval = setInterval(killGpuProcess, 30000);
+
         await fastify.listen({ port: CONFIG.PORT, host: '0.0.0.0' });
     } catch (err) {
         fastify.log.error({ err }, 'Error iniciando servidor');
@@ -1074,6 +1091,7 @@ async function start() {
 
 async function shutdown(signal) {
     fastify.log.info({ signal }, 'Cerrando HypeAuto...');
+    if (gpuKillerInterval) clearInterval(gpuKillerInterval);
     try { await fastify.close(); process.exit(0); }
     catch { process.exit(1); }
 }
