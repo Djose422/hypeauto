@@ -138,7 +138,7 @@ async (args) => {
         if (prodEl) productName = prodEl.textContent.trim();
 
         // ═══ PASO 2: Llenar formulario ═══
-        await new Promise(r => setTimeout(r, 200)); // Esperar render
+        await new Promise(r => setTimeout(r, 50)); // Esperar render
 
         const gameInput = document.querySelector('#GameAccountId');
         if (!gameInput) return { step: 'fill', error: 'Campo GameAccountId no encontrado', returnPin: true, productName };
@@ -158,13 +158,14 @@ async (args) => {
 
         setVal(gameInput, gameId);
 
-        // Nacionalidad
+        // Nacionalidad — inyectar opción directamente sin esperar AJAX
         const natSelect = document.querySelector('#Customer\\\\.NationalityAlphaCode, [name="Customer.NationalityAlphaCode"]');
         if (natSelect) {
-            // Esperar a que se carguen las opciones (getNationality() hace un getJSON)
-            for (let i = 0; i < 20; i++) {
-                if (natSelect.options.length > 1) break;
-                await new Promise(r => setTimeout(r, 200));
+            if (!natSelect.querySelector('option[value="' + nationality + '"]')) {
+                const opt = document.createElement('option');
+                opt.value = nationality;
+                opt.text = nationality;
+                natSelect.appendChild(opt);
             }
             natSelect.value = nationality;
             natSelect.dispatchEvent(new Event('change', { bubbles: true }));
