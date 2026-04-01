@@ -78,14 +78,7 @@ const BROWSER_ARGS = [
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
     '--disable-ipc-flooding-protection',
-    '--disable-blink-features=AutomationControlled',
     '--js-flags=--max-old-space-size=256',
-    // Matar SwiftShader GPU (consume ~97% CPU idle)
-    '--disable-webgl',
-    '--disable-webgl2',
-    '--disable-accelerated-2d-canvas',
-    '--disable-gpu-compositing',
-    '--use-gl=disabled',
 ];
 
 const DIAMOND_RE = /(\d+)\s*(?:diamantes|diamonds)/i;
@@ -165,38 +158,11 @@ const redeemSemaphore = new Semaphore(CONFIG.MAX_CONCURRENT);
 let browser;
 let browserLaunchPromise = null;
 
-function findChromiumPath() {
-    const fs = require('fs');
-    const path = require('path');
-    const cacheDir = path.join(process.env.HOME || '/root', '.cache', 'ms-playwright');
-    // Buscar chromium regular (no headless shell)
-    try {
-        const dirs = fs.readdirSync(cacheDir).filter(d => /^chromium-\d+$/.test(d)).sort();
-        for (const dir of dirs.reverse()) {
-            const candidates = [
-                path.join(cacheDir, dir, 'chrome-linux', 'chrome'),
-                path.join(cacheDir, dir, 'chrome-linux64', 'chrome'),
-                path.join(cacheDir, dir, 'chrome-linux', 'headless_shell'),
-            ];
-            for (const p of candidates) {
-                if (fs.existsSync(p)) return p;
-            }
-        }
-    } catch {}
-    return null;
-}
-
 async function launchBrowser() {
-    const execPath = findChromiumPath();
-    const launchOpts = {
+    browser = await chromium.launch({
         headless: CONFIG.HEADLESS,
         args: BROWSER_ARGS,
-    };
-    if (execPath) {
-        launchOpts.executablePath = execPath;
-        fastify.log.info({ executablePath: execPath }, 'Usando Chromium regular (sin SwiftShader)');
-    }
-    browser = await chromium.launch(launchOpts);
+    });
     fastify.log.info({ maxConcurrent: CONFIG.MAX_CONCURRENT }, 'Chromium listo');
     return browser;
 }
@@ -239,13 +205,6 @@ async function createWarmedPage() {
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                  + '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         locale: 'es-CL',
-    });
-
-    // Anti-detection
-    await context.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'languages', { get: () => ['es-CL', 'es', 'en'] });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
     });
 
     // Block unnecessary resources
@@ -378,6 +337,8 @@ async function automateRedeem(pin, gameAccountId) {
         fastify.log.info({ pin: pin.slice(0, 8), poolAcquireMs: Date.now() - startMs }, 'Página obtenida');
 
         // ─── PASO 1: Ingresar PIN + validar ───
+        const stepLog = (step) => fastify.log.info({ pin: pin.slice(0, 8), step, ms: Date.now() - startMs }, 'step');
+        stepLog('pin-input-wait');
         await page.waitForSelector('#pininput', { state: 'visible', timeout: 10000 });
         await page.evaluate((p) => {
             const el = document.querySelector('#pininput');
@@ -387,7 +348,10 @@ async function automateRedeem(pin, gameAccountId) {
             el.dispatchEvent(new Event('change', { bubbles: true }));
         }, pin);
 
+        stepLog('pin-filled');
+
         // Esperar a que reCAPTCHA habilite el botón
+        stepLog('recaptcha-wait');
         await page.waitForFunction(
             () => {
                 const btn = document.querySelector('#btn-validate');
@@ -395,6 +359,8 @@ async function automateRedeem(pin, gameAccountId) {
             },
             { timeout: 15000, polling: 100 }
         );
+
+        stepLog('btn-validate-ready');
 
         // Click validate + interceptar respuesta
         try {
@@ -412,12 +378,16 @@ async function automateRedeem(pin, gameAccountId) {
             fastify.log.warn({ err }, 'No se interceptó /validate');
         }
 
+        stepLog('validate-clicked');
+
         // Esperar card flip
         try {
             await page.locator('.card.back').waitFor({ state: 'visible', timeout: 15000 });
         } catch {
             await sleep(500);
         }
+
+        stepLog('card-flipped');
 
         // Verificar errores de PIN
         let pageText = await page.innerText('body');
@@ -456,6 +426,8 @@ async function automateRedeem(pin, gameAccountId) {
                 product_name: productName, nickname: '', diamonds: 0,
             };
         }
+
+        stepLog('form-visible');
 
         // ─── PASO 2: Llenar formulario ───
         const formData = {
@@ -527,6 +499,8 @@ async function automateRedeem(pin, gameAccountId) {
             });
         });
 
+        stepLog('form-filled');
+
         // ─── PASO 3: Verificar cuenta ───
         let nickname = '';
 
@@ -580,6 +554,8 @@ async function automateRedeem(pin, gameAccountId) {
                 }
             }
         }
+
+        stepLog('verify-done');
 
         // ─── PASO 4: Canjear (confirm) ───
         await page.evaluate(() => {
@@ -663,6 +639,8 @@ async function automateRedeem(pin, gameAccountId) {
         }
 
         shouldRecycle = true;
+
+        stepLog('confirm-sent');
 
         // ─── PASO 5: Evaluar resultado ───
         pageText = await page.innerText('body');
@@ -1060,15 +1038,17 @@ fastify.addHook('onClose', async () => {
     await closeBrowser();
 });
 
-function freezeGpuProcess() {
-    // SIGSTOP congela el proceso: Chromium cree que sigue vivo (no lo respawnea)
-    // pero usa 0% CPU. Mejor que matarlo (pkill) porque Chromium lo respawnea.
+function throttleGpuProcess() {
+    // renice 19 = prioridad más baja. GPU process (SwiftShader) sigue vivo
+    // para reCAPTCHA pero cede CPU a otros procesos cuando están activos.
     const { execSync } = require('child_process');
     try {
-        const result = execSync("pgrep -f 'type=gpu-process'", { encoding: 'utf8' }).trim();
-        if (result) {
-            execSync(`kill -STOP ${result.split('\\n').join(' ')}`, { stdio: 'ignore' });
-            fastify.log.info({ pids: result.split('\\n') }, 'GPU process congelado (SIGSTOP)');
+        const pids = execSync("pgrep -f 'type=gpu-process'", { encoding: 'utf8' }).trim();
+        if (pids) {
+            for (const pid of pids.split('\n')) {
+                execSync(`renice 19 -p ${pid}`, { stdio: 'ignore' });
+            }
+            fastify.log.info({ pids: pids.split('\n') }, 'GPU process → nice 19 (prioridad mínima)');
         }
     } catch {}
 }
@@ -1079,9 +1059,8 @@ async function start() {
         await fillPool();
         fastify.log.info({ poolSize: pagePool.length }, 'Pool de páginas listo');
 
-        // Congelar (SIGSTOP) el GPU process de SwiftShader (~95% CPU)
-        // Queda vivo pero frozen → 0% CPU, Chromium no lo respawnea
-        setTimeout(freezeGpuProcess, 2000);
+        // Bajar prioridad del GPU process (SwiftShader) para que no robe CPU
+        setTimeout(throttleGpuProcess, 3000);
 
         await fastify.listen({ port: CONFIG.PORT, host: '0.0.0.0' });
     } catch (err) {
