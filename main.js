@@ -80,6 +80,12 @@ const BROWSER_ARGS = [
     '--disable-ipc-flooding-protection',
     '--disable-blink-features=AutomationControlled',
     '--js-flags=--max-old-space-size=256',
+    // Matar SwiftShader GPU (consume ~97% CPU idle)
+    '--disable-webgl',
+    '--disable-webgl2',
+    '--disable-accelerated-2d-canvas',
+    '--disable-gpu-compositing',
+    '--use-gl=disabled',
 ];
 
 const DIAMOND_RE = /(\d+)\s*(?:diamantes|diamonds)/i;
