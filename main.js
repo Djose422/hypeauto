@@ -1042,16 +1042,25 @@ fastify.addHook('onClose', async () => {
 });
 
 function throttleGpuProcess() {
-    // renice 19 = prioridad más baja. GPU process (SwiftShader) sigue vivo
-    // para reCAPTCHA pero cede CPU a otros procesos cuando están activos.
-    const { execSync } = require('child_process');
+    // cpulimit capa el gpu-process (SwiftShader) al 10% CPU.
+    // reCAPTCHA sigue funcionando y los canjes son incluso más rápidos
+    // porque los renderers tienen más CPU disponible.
+    const { execSync, spawn } = require('child_process');
     try {
         const pids = execSync("pgrep -f 'type=gpu-process'", { encoding: 'utf8' }).trim();
         if (pids) {
             for (const pid of pids.split('\n')) {
+                // renice como fallback
                 execSync(`renice 19 -p ${pid}`, { stdio: 'ignore' });
+                // cpulimit en background (10% CPU cap)
+                try {
+                    const cp = spawn('cpulimit', ['-p', pid, '-l', '10'], {
+                        stdio: 'ignore', detached: true,
+                    });
+                    cp.unref();
+                } catch {}
             }
-            fastify.log.info({ pids: pids.split('\n') }, 'GPU process → nice 19 (prioridad mínima)');
+            fastify.log.info({ pids: pids.split('\n') }, 'GPU process → cpulimit 10% + nice 19');
         }
     } catch {}
 }
