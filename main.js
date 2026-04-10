@@ -413,13 +413,21 @@ async function automateRedeem(pin, gameAccountId) {
         const prodEl = await page.$('.product-header h2');
         if (prodEl) productName = (await prodEl.textContent()).trim();
 
-        // Verificar que el formulario apareció
-        const cardBack = page.locator('.card.back');
-        let cardBackHtml = '';
-        if (await cardBack.count() > 0) {
-            cardBackHtml = await cardBack.first().innerHTML();
+        // Esperar a que el formulario (GameAccountId) aparezca realmente
+        let formAppeared = false;
+        try {
+            await page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 10000 });
+            formAppeared = true;
+        } catch {
+            // Retry: a veces el card flip no cargó bien, esperar un poco más
+            try {
+                await sleep(1000);
+                formAppeared = await page.evaluate(
+                    () => !!document.querySelector('#GameAccountId')
+                );
+            } catch {}
         }
-        if (!cardBackHtml || !cardBackHtml.includes('GameAccountId')) {
+        if (!formAppeared) {
             shouldRecycle = true;
             return {
                 success: false,
