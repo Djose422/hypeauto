@@ -654,11 +654,41 @@ async function automateRedeem(pin, gameAccountId) {
         stepLog('confirm-sent');
 
         // ─── PASO 5: Evaluar resultado ───
+
+        // Si el servidor respondió HTTP < 400, el canje fue aceptado.
+        // Solo marcar como fallo si el body dice explícitamente Success:false.
+        if (confirmOk) {
+            if (confirmBody) {
+                try {
+                    const json = JSON.parse(confirmBody);
+                    if (json && typeof json === 'object' && json.Success === false) {
+                        return {
+                            success: false,
+                            error: classifyError('confirm', json.Message),
+                            error_message: json.Message || 'Error del servidor',
+                            return_pin: false,
+                            product_name: productName, nickname, diamonds: 0,
+                        };
+                    }
+                } catch {}
+            }
+            // HTTP OK = canje aceptado por el servidor
+            fastify.log.info({ pin: pin.slice(0, 8), confirmOk, bodyLen: confirmBody.length }, 'Confirm HTTP OK → éxito');
+            return {
+                success: true,
+                error: ErrorType.NONE, error_message: '',
+                return_pin: false,
+                product_name: productName, nickname,
+                diamonds: parseDiamonds(productName),
+            };
+        }
+
+        // confirmOk es false — evaluar por DOM y keywords
         pageText = await page.innerText('body');
         lowerText = pageText.toLowerCase();
         const combinedText = `${lowerText} ${confirmBody.toLowerCase()}`;
 
-        // Success keywords
+        // Success keywords en página o body
         const successKw = SUCCESS_KEYWORDS.find(kw => combinedText.includes(kw));
         if (successKw) {
             return {
@@ -670,31 +700,8 @@ async function automateRedeem(pin, gameAccountId) {
             };
         }
 
-        // Confirm JSON
-        if (confirmOk && confirmBody) {
-            try {
-                const json = JSON.parse(confirmBody);
-                if (json && typeof json === 'object') {
-                    if (json.Success === true) {
-                        return {
-                            success: true,
-                            error: ErrorType.NONE, error_message: '',
-                            return_pin: false,
-                            product_name: productName, nickname,
-                            diamonds: parseDiamonds(productName),
-                        };
-                    }
-                    return {
-                        success: false,
-                        error: classifyError('confirm', json.Message),
-                        error_message: json.Message || 'Error del servidor',
-                        return_pin: false,
-                        product_name: productName, nickname, diamonds: 0,
-                    };
-                }
-            } catch {}
-
-            // Non-JSON body sin errores = éxito
+        // Non-JSON body sin errores = posible éxito
+        if (confirmBody) {
             const hasError = CONFIRM_ERROR_KEYWORDS.some(kw => confirmBody.toLowerCase().includes(kw));
             if (!hasError) {
                 return {
