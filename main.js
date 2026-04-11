@@ -683,21 +683,43 @@ async function automateRedeem(pin, gameAccountId) {
             };
         }
 
-        // confirmOk es false — evaluar por DOM y keywords
-        pageText = await page.innerText('body');
-        lowerText = pageText.toLowerCase();
-        const combinedText = `${lowerText} ${confirmBody.toLowerCase()}`;
+        // confirmOk es false — el waitForResponse hizo timeout.
+        // Pero el click pudo haber enviado el request al server.
+        // Safety net: esperar y re-verificar el DOM múltiples veces.
+        fastify.log.warn({ pin: pin.slice(0, 8) }, 'Confirm timeout — activando safety net');
 
-        // Success keywords en página o body
-        const successKw = SUCCESS_KEYWORDS.find(kw => combinedText.includes(kw));
-        if (successKw) {
-            return {
-                success: true,
-                error: ErrorType.NONE, error_message: '',
-                return_pin: false,
-                product_name: productName, nickname,
-                diamonds: parseDiamonds(productName),
-            };
+        for (let retry = 0; retry < 3; retry++) {
+            await sleep(2000);
+            try {
+                pageText = await page.innerText('body');
+                lowerText = pageText.toLowerCase();
+                const combinedText = `${lowerText} ${confirmBody.toLowerCase()}`;
+
+                const successKw = SUCCESS_KEYWORDS.find(kw => combinedText.includes(kw));
+                if (successKw) {
+                    fastify.log.info({ pin: pin.slice(0, 8), retry }, 'Safety net: éxito detectado en DOM');
+                    return {
+                        success: true,
+                        error: ErrorType.NONE, error_message: '',
+                        return_pin: false,
+                        product_name: productName, nickname,
+                        diamonds: parseDiamonds(productName),
+                    };
+                }
+
+                // Si el formulario ya no es visible, probablemente el canje fue exitoso
+                const stillOnForm = STILL_ON_FORM_KEYWORDS.some(kw => lowerText.includes(kw));
+                if (!stillOnForm) {
+                    fastify.log.info({ pin: pin.slice(0, 8), retry }, 'Safety net: formulario desapareció → éxito asumido');
+                    return {
+                        success: true,
+                        error: ErrorType.NONE, error_message: '',
+                        return_pin: false,
+                        product_name: productName, nickname,
+                        diamonds: parseDiamonds(productName),
+                    };
+                }
+            } catch {}
         }
 
         // Non-JSON body sin errores = posible éxito
@@ -714,22 +736,12 @@ async function automateRedeem(pin, gameAccountId) {
             }
         }
 
-        // Form still visible
-        if (STILL_ON_FORM_KEYWORDS.some(kw => lowerText.includes(kw))) {
-            return {
-                success: false,
-                error: ErrorType.UNKNOWN,
-                error_message: 'Formulario sigue visible - canje no completado',
-                return_pin: false,
-                product_name: productName, nickname, diamonds: 0,
-            };
-        }
-
-        // Resultado incierto
+        // Tras 3 reintentos (6s extra) el formulario sigue visible
+        fastify.log.warn({ pin: pin.slice(0, 8) }, 'Safety net agotado — formulario sigue visible');
         return {
             success: false,
             error: ErrorType.UNKNOWN,
-            error_message: 'Resultado incierto – no se confirmó el canje',
+            error_message: 'Formulario sigue visible tras safety net - canje no completado',
             return_pin: false,
             product_name: productName, nickname, diamonds: 0,
         };
