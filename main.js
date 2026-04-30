@@ -367,34 +367,6 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
 
         // ─── PASO 1: Ingresar PIN + validar ───
         const stepLog = (step) => fastify.log.info({ pin: pin.slice(0, 8), step, ms: Date.now() - startMs }, 'step');
-        stepLog('pin-input-wait');
-        await page.waitForSelector('#pininput', { state: 'visible', timeout: 10000 });
-        await page.evaluate((p) => {
-            const el = document.querySelector('#pininput');
-            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-            setter.call(el, p);
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-        }, pin);
-
-        stepLog('pin-filled');
-
-        // Esperar a que reCAPTCHA habilite el botón
-        stepLog('recaptcha-wait');
-        await page.waitForFunction(
-            () => {
-                const btn = document.querySelector('#btn-validate');
-                return btn && !btn.disabled;
-            },
-            { timeout: 15000, polling: 100 }
-        );
-
-        stepLog('btn-validate-ready');
-
-        // ─── Validate con detección temprana de fallo ───
-        // Hace click + intercepta /validate; si el server responde con error, abortamos en segundos.
-        // Si el server respondió OK pero el form no aparece, hacemos UN retry recargando la página.
-        // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
         // Captura ligera del estado de la página para diagnosticar fallos de Hype.
         // Solo lectura DOM + URL — no afecta el flujo. Se ejecuta cuando algo no salió como se esperaba.
@@ -426,6 +398,66 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
                 fastify.log.warn({ pin: pin.slice(0, 8), where, err: e && e.message }, 'No se pudo capturar estado de página');
             }
         };
+
+        stepLog('pin-input-wait');
+        await page.waitForSelector('#pininput', { state: 'visible', timeout: 10000 });
+        await page.evaluate((p) => {
+            const el = document.querySelector('#pininput');
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+            setter.call(el, p);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        }, pin);
+
+        stepLog('pin-filled');
+
+        // Esperar a que reCAPTCHA habilite el botón.
+        // A veces reCAPTCHA falla en cargar y el botón queda deshabilitado para siempre.
+        // Si tras 8s no se habilita, recargamos UNA vez (un refresh manual lo arregla, según pruebas).
+        stepLog('recaptcha-wait');
+        const waitBtnEnabled = (timeoutMs) => page.waitForFunction(
+            () => {
+                const btn = document.querySelector('#btn-validate');
+                return btn && !btn.disabled;
+            },
+            { timeout: timeoutMs, polling: 100 }
+        );
+        try {
+            await waitBtnEnabled(8000);
+        } catch {
+            // reCAPTCHA no habilitó el botón → reload y reintentar (PIN aún no consumido)
+            fastify.log.warn({ pin: pin.slice(0, 8) }, 'reCAPTCHA no habilitó el botón en 8s — refrescando página');
+            try {
+                await page.goto(CONFIG.REDEEM_URL, { waitUntil: 'domcontentloaded', timeout: 10000 });
+                await page.waitForSelector('#pininput', { state: 'visible', timeout: 6000 });
+                await page.evaluate((p) => {
+                    const el = document.querySelector('#pininput');
+                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                    setter.call(el, p);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }, pin);
+                stepLog('recaptcha-wait-after-reload');
+                await waitBtnEnabled(10000);
+            } catch (rcErr) {
+                await capturePageState('recaptcha-stuck');
+                shouldRecycle = true;
+                return {
+                    success: false,
+                    error: ErrorType.PAGE_ERROR,
+                    error_message: 'reCAPTCHA no habilitó el botón tras refresh',
+                    return_pin: true,
+                    nickname: '', product_name: '', diamonds: 0,
+                };
+            }
+        }
+
+        stepLog('btn-validate-ready');
+
+        // ─── Validate con detección temprana de fallo ───
+        // Hace click + intercepta /validate; si el server responde con error, abortamos en segundos.
+        // Si el server respondió OK pero el form no aparece, hacemos UN retry recargando la página.
+        // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
         const doValidateAndWaitForm = async (label) => {
             // Devuelve { ok, formAppeared, validateStatus, validateBody, serverError }
