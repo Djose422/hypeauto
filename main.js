@@ -460,61 +460,71 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
         const doValidateAndWaitForm = async (label) => {
-            // Devuelve { ok, formAppeared, validateStatus, validateBody, serverError }
-            // serverError indica que Hype rechazó el PIN explícitamente.
-            const validatePromise = page.waitForResponse(
-                r => r.url().includes('/validate') && !r.url().includes('account'),
-                { timeout: 12000 }
-            ).catch((e) => ({ _timeout: true, err: e && e.message }));
-
-            await page.evaluate(() => document.querySelector('#btn-validate').click());
-            const resp = await validatePromise;
-
+            // Estrategia: click + carrera entre (form aparece) vs (/validate responde con error).
+            // El form es la fuente de verdad del éxito; /validate solo nos sirve para fail-fast en error explícito.
+            // No bloqueamos hasta 12s al /validate cuando el form ya podría estar visible.
             let validateStatus = null;
             let validateBody = '';
             let serverError = null;
 
-            if (resp && !resp._timeout) {
-                validateStatus = resp.status();
-                try { validateBody = await resp.text(); } catch {}
+            // Listener no bloqueante para /validate (lo procesamos si llega antes que el form)
+            const validatePromise = page.waitForResponse(
+                r => r.url().includes('/validate') && !r.url().includes('account'),
+                { timeout: 10000 }
+            ).then(async (resp) => {
+                try {
+                    validateStatus = resp.status();
+                    validateBody = await resp.text();
+                    if (validateBody) {
+                        try {
+                            const j = JSON.parse(validateBody);
+                            if (j && typeof j === 'object' && j.Success === false) {
+                                serverError = j.Message || 'PIN rechazado por el servidor';
+                            }
+                        } catch {}
+                    }
+                    if (validateStatus >= 400 && !serverError) {
+                        serverError = `HTTP ${validateStatus} en /validate`;
+                    }
+                } catch {}
+                return { kind: 'validate', serverError };
+            }).catch(() => ({ kind: 'validate-timeout' }));
 
-                // Parse body: si Success:false o Message de error → fail-fast
-                if (validateBody) {
-                    try {
-                        const j = JSON.parse(validateBody);
-                        if (j && typeof j === 'object' && j.Success === false) {
-                            serverError = j.Message || 'PIN rechazado por el servidor';
-                        }
-                    } catch {}
-                }
-                if (validateStatus >= 400 && !serverError) {
-                    serverError = `HTTP ${validateStatus} en /validate`;
-                }
-            } else {
-                fastify.log.warn({ pin: pin.slice(0, 8), label }, '/validate no respondió a tiempo');
-                await capturePageState(`${label}-validate-timeout`);
-            }
-
+            await page.evaluate(() => document.querySelector('#btn-validate').click());
             stepLog(`${label}-validate-clicked`);
 
-            if (serverError) {
-                return { ok: false, formAppeared: false, validateStatus, validateBody, serverError };
+            // Carrera: form aparece (éxito) vs /validate trae error (fail-fast)
+            const formPromise = page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 8000 })
+                .then(() => ({ kind: 'form' }))
+                .catch(() => ({ kind: 'form-timeout' }));
+
+            const errorPromise = validatePromise.then(r => {
+                if (r && r.serverError) return { kind: 'server-error', serverError: r.serverError };
+                return { kind: 'validate-no-error' }; // /validate llegó OK, esperamos al form igual
+            });
+
+            // Esperamos lo primero entre: form visible | error explícito de servidor
+            const racers = [formPromise, errorPromise.then(r => r.kind === 'server-error' ? r : new Promise(() => {}))];
+            const winner = await Promise.race(racers);
+
+            if (winner.kind === 'server-error') {
+                return { ok: false, formAppeared: false, validateStatus, validateBody, serverError: winner.serverError };
             }
 
-            // Card flip (no crítico, solo señal visual). Timeout corto.
-            try {
-                await page.locator('.card.back').waitFor({ state: 'visible', timeout: 6000 });
-            } catch {
-                await sleep(200);
-            }
-            stepLog(`${label}-card-flipped`);
+            const formAppeared = winner.kind === 'form';
 
-            // Detección rápida del form: 5s con polling 200ms
-            let formAppeared = false;
-            try {
-                await page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 5000 });
-                formAppeared = true;
-            } catch {}
+            // Card flip (señal visual, no bloqueante si ya tenemos el form)
+            if (formAppeared) {
+                stepLog(`${label}-form-detected`);
+            } else {
+                // Form no apareció en 8s: damos un último vistazo al estado de /validate (si llegó)
+                await Promise.race([validatePromise, sleep(500)]);
+                if (serverError) {
+                    return { ok: false, formAppeared: false, validateStatus, validateBody, serverError };
+                }
+                fastify.log.warn({ pin: pin.slice(0, 8), label }, 'Form no apareció en 8s tras click');
+                await capturePageState(`${label}-no-form`);
+            }
 
             return { ok: true, formAppeared, validateStatus, validateBody, serverError: null };
         };
