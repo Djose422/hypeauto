@@ -396,6 +396,37 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         // Si el server respondió OK pero el form no aparece, hacemos UN retry recargando la página.
         // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
+        // Captura ligera del estado de la página para diagnosticar fallos de Hype.
+        // Solo lectura DOM + URL — no afecta el flujo. Se ejecuta cuando algo no salió como se esperaba.
+        const capturePageState = async (where) => {
+            try {
+                const snap = await page.evaluate(() => {
+                    const txt = (document.body && document.body.innerText) ? document.body.innerText.slice(0, 400).replace(/\s+/g, ' ').trim() : '';
+                    const visible = (sel) => { const e = document.querySelector(sel); return !!(e && e.offsetParent !== null); };
+                    const btn = document.querySelector('#btn-validate');
+                    const errEls = Array.from(document.querySelectorAll('.error, .alert, .text-danger, [class*="error"]'))
+                        .filter(e => e.offsetParent !== null)
+                        .map(e => (e.innerText || '').trim().slice(0, 120))
+                        .filter(Boolean)
+                        .slice(0, 3);
+                    return {
+                        url: location.href,
+                        readyState: document.readyState,
+                        textSnippet: txt,
+                        hasPinInput: visible('#pininput'),
+                        hasGameAccountId: visible('#GameAccountId'),
+                        hasCardBack: visible('.card.back'),
+                        hasProductHeader: visible('.product-header'),
+                        validateBtnDisabled: btn ? btn.disabled : null,
+                        errorMessages: errEls,
+                    };
+                });
+                fastify.log.warn({ pin: pin.slice(0, 8), where, ...snap }, 'Diagnóstico de página');
+            } catch (e) {
+                fastify.log.warn({ pin: pin.slice(0, 8), where, err: e && e.message }, 'No se pudo capturar estado de página');
+            }
+        };
+
         const doValidateAndWaitForm = async (label) => {
             // Devuelve { ok, formAppeared, validateStatus, validateBody, serverError }
             // serverError indica que Hype rechazó el PIN explícitamente.
@@ -429,6 +460,7 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
                 }
             } else {
                 fastify.log.warn({ pin: pin.slice(0, 8), label }, '/validate no respondió a tiempo');
+                await capturePageState(`${label}-validate-timeout`);
             }
 
             stepLog(`${label}-validate-clicked`);
@@ -538,6 +570,7 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
 
         if (!v.formAppeared) {
             // PIN nunca se confirmó → return_pin: true (jadhstore lo devuelve al stock)
+            await capturePageState('form-no-aparecio');
             shouldRecycle = true;
             return {
                 success: false,
