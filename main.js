@@ -391,37 +391,88 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
 
         stepLog('btn-validate-ready');
 
-        // Click validate + interceptar respuesta
-        try {
+        // ─── Validate con detección temprana de fallo ───
+        // Hace click + intercepta /validate; si el server responde con error, abortamos en segundos.
+        // Si el server respondió OK pero el form no aparece, hacemos UN retry recargando la página.
+        // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
+
+        const doValidateAndWaitForm = async (label) => {
+            // Devuelve { ok, formAppeared, validateStatus, validateBody, serverError }
+            // serverError indica que Hype rechazó el PIN explícitamente.
             const validatePromise = page.waitForResponse(
                 r => r.url().includes('/validate') && !r.url().includes('account'),
-                { timeout: 30000 }
-            );
+                { timeout: 12000 }
+            ).catch((e) => ({ _timeout: true, err: e && e.message }));
+
             await page.evaluate(() => document.querySelector('#btn-validate').click());
-            const validateResp = await validatePromise;
+            const resp = await validatePromise;
 
-            if (validateResp.status() >= 400) {
-                fastify.log.warn({ status: validateResp.status() }, '/validate HTTP error');
+            let validateStatus = null;
+            let validateBody = '';
+            let serverError = null;
+
+            if (resp && !resp._timeout) {
+                validateStatus = resp.status();
+                try { validateBody = await resp.text(); } catch {}
+
+                // Parse body: si Success:false o Message de error → fail-fast
+                if (validateBody) {
+                    try {
+                        const j = JSON.parse(validateBody);
+                        if (j && typeof j === 'object' && j.Success === false) {
+                            serverError = j.Message || 'PIN rechazado por el servidor';
+                        }
+                    } catch {}
+                }
+                if (validateStatus >= 400 && !serverError) {
+                    serverError = `HTTP ${validateStatus} en /validate`;
+                }
+            } else {
+                fastify.log.warn({ pin: pin.slice(0, 8), label }, '/validate no respondió a tiempo');
             }
-        } catch (err) {
-            fastify.log.warn({ err: err && err.message }, 'No se interceptó /validate');
+
+            stepLog(`${label}-validate-clicked`);
+
+            if (serverError) {
+                return { ok: false, formAppeared: false, validateStatus, validateBody, serverError };
+            }
+
+            // Card flip (no crítico, solo señal visual). Timeout corto.
+            try {
+                await page.locator('.card.back').waitFor({ state: 'visible', timeout: 6000 });
+            } catch {
+                await sleep(200);
+            }
+            stepLog(`${label}-card-flipped`);
+
+            // Detección rápida del form: 5s con polling 200ms
+            let formAppeared = false;
+            try {
+                await page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 5000 });
+                formAppeared = true;
+            } catch {}
+
+            return { ok: true, formAppeared, validateStatus, validateBody, serverError: null };
+        };
+
+        // Intento 1
+        let v = await doValidateAndWaitForm('try1');
+
+        // Si Hype rechazó el PIN explícitamente → abortar inmediatamente (PIN intacto)
+        if (v.serverError) {
+            shouldRecycle = true;
+            return {
+                success: false,
+                error: classifyError('validate', v.serverError),
+                error_message: `Error de PIN: ${v.serverError}`,
+                return_pin: true,
+                nickname: '', product_name: '', diamonds: 0,
+            };
         }
 
-        stepLog('validate-clicked');
-
-        // Esperar card flip
-        try {
-            await page.locator('.card.back').waitFor({ state: 'visible', timeout: 15000 });
-        } catch {
-            await sleep(500);
-        }
-
-        stepLog('card-flipped');
-
-        // Verificar errores de PIN
-        let pageText = await page.innerText('body');
+        // Verificar errores de PIN en el DOM (mensajes visibles)
+        let pageText = await page.innerText('body').catch(() => '');
         let lowerText = pageText.toLowerCase();
-
         const pinError = PIN_ERROR_KEYWORDS.find(kw => lowerText.includes(kw.toLowerCase()));
         if (pinError) {
             shouldRecycle = true;
@@ -434,35 +485,20 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
             };
         }
 
-        // Extraer nombre del producto
+        // Extraer nombre del producto (puede haber llegado aunque el form no)
         let productName = '';
-        const prodEl = await page.$('.product-header h2');
-        if (prodEl) productName = (await prodEl.textContent()).trim();
-
-        // Esperar a que el formulario (GameAccountId) aparezca realmente
-        let formAppeared = false;
         try {
-            await page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 15000 });
-            formAppeared = true;
-        } catch {
-            // Retry 1: a veces el card flip no cargó bien, esperar un poco más
-            try {
-                await sleep(1000);
-                formAppeared = await page.evaluate(
-                    () => {
-                        const el = document.querySelector('#GameAccountId');
-                        return !!el && el.offsetParent !== null;
-                    }
-                );
-            } catch {}
-        }
+            const prodEl = await page.$('.product-header h2');
+            if (prodEl) productName = (await prodEl.textContent()).trim();
+        } catch {}
 
-        // Retry 2 (fix A): si aún no apareció, recargar la página y reintentar el flujo de validar PIN UNA vez
-        if (!formAppeared) {
-            fastify.log.warn({ pin: pin.slice(0, 8) }, 'Formulario no apareció — reintentando con página recargada');
+        // Si form no apareció en 5s → recargar y reintentar UNA vez
+        // (re-llamar a /validate NO consume el PIN, solo /confirm lo hace)
+        if (!v.formAppeared) {
+            fastify.log.warn({ pin: pin.slice(0, 8) }, 'Form no apareció en 5s — recargando y reintentando');
             try {
-                await page.goto(CONFIG.REDEEM_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
-                await page.waitForSelector('#pininput', { state: 'visible', timeout: 10000 });
+                await page.goto(CONFIG.REDEEM_URL, { waitUntil: 'domcontentloaded', timeout: 10000 });
+                await page.waitForSelector('#pininput', { state: 'visible', timeout: 6000 });
                 await page.evaluate((p) => {
                     const el = document.querySelector('#pininput');
                     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -472,24 +508,36 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
                 }, pin);
                 await page.waitForFunction(
                     () => { const b = document.querySelector('#btn-validate'); return b && !b.disabled; },
-                    { timeout: 15000, polling: 100 }
+                    { timeout: 8000, polling: 100 }
                 );
-                const retryValidatePromise = page.waitForResponse(
-                    r => r.url().includes('/validate') && !r.url().includes('account'),
-                    { timeout: 30000 }
-                ).catch(() => null);
-                await page.evaluate(() => document.querySelector('#btn-validate').click());
-                await retryValidatePromise;
-                try { await page.locator('.card.back').waitFor({ state: 'visible', timeout: 15000 }); } catch {}
-                await page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 15000 });
-                formAppeared = true;
-                stepLog('form-visible-after-retry');
+                v = await doValidateAndWaitForm('try2');
+
+                if (v.serverError) {
+                    shouldRecycle = true;
+                    return {
+                        success: false,
+                        error: classifyError('validate', v.serverError),
+                        error_message: `Error de PIN: ${v.serverError}`,
+                        return_pin: true,
+                        nickname: '', product_name: '', diamonds: 0,
+                    };
+                }
+                if (v.formAppeared) stepLog('form-visible-after-retry');
+
+                // Re-extraer producto si no se obtuvo antes
+                if (!productName) {
+                    try {
+                        const prodEl = await page.$('.product-header h2');
+                        if (prodEl) productName = (await prodEl.textContent()).trim();
+                    } catch {}
+                }
             } catch (retryErr) {
                 fastify.log.warn({ err: retryErr && retryErr.message, pin: pin.slice(0, 8) }, 'Retry de validate también falló');
             }
         }
 
-        if (!formAppeared) {
+        if (!v.formAppeared) {
+            // PIN nunca se confirmó → return_pin: true (jadhstore lo devuelve al stock)
             shouldRecycle = true;
             return {
                 success: false,
