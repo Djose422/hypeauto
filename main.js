@@ -428,7 +428,7 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
             // reCAPTCHA no habilitó el botón → reload y reintentar (PIN aún no consumido)
             fastify.log.warn({ pin: pin.slice(0, 8) }, 'reCAPTCHA no habilitó el botón en 8s — refrescando página');
             try {
-                await page.goto(CONFIG.REDEEM_URL, { waitUntil: 'domcontentloaded', timeout: 10000 });
+                await page.goto(CONFIG.REDEEM_URL, { waitUntil: 'commit', timeout: 15000 });
                 await page.waitForSelector('#pininput', { state: 'visible', timeout: 6000 });
                 await page.evaluate((p) => {
                     const el = document.querySelector('#pininput');
@@ -571,7 +571,7 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         if (!v.formAppeared) {
             fastify.log.warn({ pin: pin.slice(0, 8) }, 'Form no apareció en 5s — recargando y reintentando');
             try {
-                await page.goto(CONFIG.REDEEM_URL, { waitUntil: 'domcontentloaded', timeout: 10000 });
+                await page.goto(CONFIG.REDEEM_URL, { waitUntil: 'commit', timeout: 15000 });
                 await page.waitForSelector('#pininput', { state: 'visible', timeout: 6000 });
                 await page.evaluate((p) => {
                     const el = document.querySelector('#pininput');
