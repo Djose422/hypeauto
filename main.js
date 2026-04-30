@@ -329,6 +329,32 @@ function recyclePage(entry) {
 
 async function automateRedeem(pin, gameAccountId) {
     const startMs = Date.now();
+    let result;
+    try {
+        result = await _automateRedeemImpl(pin, gameAccountId, startMs);
+    } catch (err) {
+        // _automateRedeemImpl ya captura sus errores; este catch es defensa en profundidad
+        fastify.log.error({ err }, 'automateRedeem error inesperado');
+        result = {
+            success: false,
+            error: ErrorType.UNKNOWN,
+            error_message: err && err.message ? err.message : String(err),
+            return_pin: false,
+            product_name: '', nickname: '', diamonds: 0,
+        };
+    }
+    fastify.log.info({
+        pin: pin.slice(0, 8),
+        elapsedMs: Date.now() - startMs,
+        success: result.success,
+        error: result.error,
+        error_message: result.error_message,
+        return_pin: result.return_pin,
+    }, 'Canje completado');
+    return result;
+}
+
+async function _automateRedeemImpl(pin, gameAccountId, startMs) {
     let entry;
     let shouldRecycle = false;
     let redeemClicked = false;
@@ -369,7 +395,7 @@ async function automateRedeem(pin, gameAccountId) {
         try {
             const validatePromise = page.waitForResponse(
                 r => r.url().includes('/validate') && !r.url().includes('account'),
-                { timeout: 15000 }
+                { timeout: 30000 }
             );
             await page.evaluate(() => document.querySelector('#btn-validate').click());
             const validateResp = await validatePromise;
@@ -378,7 +404,7 @@ async function automateRedeem(pin, gameAccountId) {
                 fastify.log.warn({ status: validateResp.status() }, '/validate HTTP error');
             }
         } catch (err) {
-            fastify.log.warn({ err }, 'No se interceptó /validate');
+            fastify.log.warn({ err: err && err.message }, 'No se interceptó /validate');
         }
 
         stepLog('validate-clicked');
@@ -416,17 +442,53 @@ async function automateRedeem(pin, gameAccountId) {
         // Esperar a que el formulario (GameAccountId) aparezca realmente
         let formAppeared = false;
         try {
-            await page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 10000 });
+            await page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 15000 });
             formAppeared = true;
         } catch {
-            // Retry: a veces el card flip no cargó bien, esperar un poco más
+            // Retry 1: a veces el card flip no cargó bien, esperar un poco más
             try {
                 await sleep(1000);
                 formAppeared = await page.evaluate(
-                    () => !!document.querySelector('#GameAccountId')
+                    () => {
+                        const el = document.querySelector('#GameAccountId');
+                        return !!el && el.offsetParent !== null;
+                    }
                 );
             } catch {}
         }
+
+        // Retry 2 (fix A): si aún no apareció, recargar la página y reintentar el flujo de validar PIN UNA vez
+        if (!formAppeared) {
+            fastify.log.warn({ pin: pin.slice(0, 8) }, 'Formulario no apareció — reintentando con página recargada');
+            try {
+                await page.goto(CONFIG.REDEEM_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                await page.waitForSelector('#pininput', { state: 'visible', timeout: 10000 });
+                await page.evaluate((p) => {
+                    const el = document.querySelector('#pininput');
+                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                    setter.call(el, p);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }, pin);
+                await page.waitForFunction(
+                    () => { const b = document.querySelector('#btn-validate'); return b && !b.disabled; },
+                    { timeout: 15000, polling: 100 }
+                );
+                const retryValidatePromise = page.waitForResponse(
+                    r => r.url().includes('/validate') && !r.url().includes('account'),
+                    { timeout: 30000 }
+                ).catch(() => null);
+                await page.evaluate(() => document.querySelector('#btn-validate').click());
+                await retryValidatePromise;
+                try { await page.locator('.card.back').waitFor({ state: 'visible', timeout: 15000 }); } catch {}
+                await page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 15000 });
+                formAppeared = true;
+                stepLog('form-visible-after-retry');
+            } catch (retryErr) {
+                fastify.log.warn({ err: retryErr && retryErr.message, pin: pin.slice(0, 8) }, 'Retry de validate también falló');
+            }
+        }
+
         if (!formAppeared) {
             shouldRecycle = true;
             return {
@@ -439,6 +501,41 @@ async function automateRedeem(pin, gameAccountId) {
         }
 
         stepLog('form-visible');
+
+        // ─── Comprobación de FORMULARIO ESTABLE ───
+        // Espera a que todos los campos clave estén presentes Y visibles Y que el conteo
+        // se mantenga estable durante 2 polls consecutivos (evita capturar el form a medio renderizar).
+        let formStable = false;
+        try {
+            await page.waitForFunction(
+                () => {
+                    const ids = ['#GameAccountId', '#Name', '#BornAt'];
+                    const allPresent = ids.every(sel => {
+                        const el = document.querySelector(sel);
+                        return el && el.offsetParent !== null && !el.disabled;
+                    });
+                    if (!allPresent) return false;
+                    const nat = document.querySelector('#NationalityAlphaCode') ||
+                                document.querySelector('[name="Customer.NationalityAlphaCode"]');
+                    if (!nat || nat.offsetParent === null) return false;
+                    // Marcar timestamp y comparar en próximo poll
+                    const now = Date.now();
+                    if (!window.__hypeFormStableSince) {
+                        window.__hypeFormStableSince = now;
+                        return false;
+                    }
+                    return (now - window.__hypeFormStableSince) >= 300;
+                },
+                { timeout: 8000, polling: 150 }
+            );
+            formStable = true;
+        } catch {
+            // No estable en 8s — seguir igualmente; el flujo posterior tiene reintentos propios
+            fastify.log.warn({ pin: pin.slice(0, 8) }, 'Formulario no estabilizó en 8s — continuando');
+        }
+        // Limpiar marca para futuros usos de la misma página
+        await page.evaluate(() => { try { delete window.__hypeFormStableSince; } catch {} }).catch(() => {});
+        if (formStable) stepLog('form-stable');
 
         // ─── PASO 2: Llenar formulario ───
         const formData = {
@@ -756,9 +853,6 @@ async function automateRedeem(pin, gameAccountId) {
             product_name: '', nickname: '', diamonds: 0,
         };
     } finally {
-        const elapsed = Date.now() - startMs;
-        fastify.log.info({ pin: pin.slice(0, 8), elapsedMs: elapsed }, 'Canje completado');
-
         if (entry) {
             if (shouldRecycle) {
                 recyclePage(entry);
