@@ -559,6 +559,28 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
             };
         }
 
+        // ─── Abortar si Hype mostró "Ha ocurrido un error interno" en /validate ───
+        // Reintentar tras este mensaje provoca que en el segundo intento Hype CONSUMA
+        // el PIN sin acreditar Hypes (visto en producción May 02: PINs 168C43E7, 28AFBBC7,
+        // 18B59348, etc.). PIN intacto en este punto: devolver al stock para revisión manual.
+        if (!v.formAppeared && (
+            lowerText.includes('ha ocurrido un error interno') ||
+            lowerText.includes('error interno') ||
+            lowerText.includes('internal error') ||
+            lowerText.includes('intente nuevamente') ||
+            lowerText.includes('try again')
+        )) {
+            shouldRecycle = true;
+            fastify.log.warn({ pin: pin.slice(0, 8) }, 'Hype mostró error interno en validate — abortando sin reintentar (PIN intacto)');
+            return {
+                success: false,
+                error: ErrorType.PAGE_ERROR,
+                error_message: 'Hype mostró error interno al validar el PIN. Inténtelo nuevamente más tarde.',
+                return_pin: true,
+                nickname: '', product_name: '', diamonds: 0,
+            };
+        }
+
         // Extraer nombre del producto (puede haber llegado aunque el form no)
         let productName = '';
         try {
