@@ -200,6 +200,7 @@ async function ensureBrowser() {
 
 const pagePool = [];
 let poolFilling = false;
+let pageIdSeq = 0;
 
 async function createWarmedPage() {
     const b = await ensureBrowser();
@@ -244,15 +245,18 @@ async function createWarmedPage() {
     }).catch(() => {});
 
     // Wait for reCAPTCHA
+    let recaptchaReady = false;
     for (let i = 0; i < 30; i++) {
         const ready = await page.evaluate(
             () => typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.execute === 'function'
         );
-        if (ready) break;
+        if (ready) { recaptchaReady = true; break; }
         await sleep(150);
     }
 
-    return { context, page, ready: true };
+    const id = ++pageIdSeq;
+    const now = Date.now();
+    return { context, page, ready: true, id, createdAt: now, warmedAt: now, useCount: 0, recaptchaReady };
 }
 
 async function fillPool() {
@@ -314,8 +318,9 @@ function recyclePage(entry) {
             }
 
             if (pagePool.length < CONFIG.MAX_CONCURRENT + 1) {
+                entry.warmedAt = Date.now();
                 pagePool.push(entry);
-                fastify.log.info({ poolSize: pagePool.length }, 'Página reciclada al pool');
+                fastify.log.info({ poolSize: pagePool.length, pageId: entry.id, useCount: entry.useCount }, 'Página reciclada al pool');
             } else {
                 await entry.context.close();
             }
@@ -362,15 +367,72 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
     let entry;
     let shouldRecycle = false;
     let redeemClicked = false;
+    const traceId = crypto.randomBytes(4).toString('hex');
+    // Buffer de eventos de red relevantes durante este canje (volcado al final si hay fallo)
+    const netLog = [];
+    let detachNet = () => {};
 
     try {
         entry = await acquirePage();
         const { page } = entry;
+        entry.useCount = (entry.useCount || 0) + 1;
 
-        fastify.log.info({ pin: pin.slice(0, 8), poolAcquireMs: Date.now() - startMs }, 'Página obtenida');
+        const pageAgeMs = Date.now() - (entry.warmedAt || entry.createdAt || Date.now());
+        const totalAgeMs = Date.now() - (entry.createdAt || Date.now());
+        fastify.log.info({
+            pin: pin.slice(0, 8), traceId,
+            poolAcquireMs: Date.now() - startMs,
+            pageId: entry.id, useCount: entry.useCount,
+            pageAgeMs, totalAgeMs, recaptchaReady: entry.recaptchaReady,
+        }, 'Página obtenida');
+
+        // ─── Listeners de red para diagnosticar fallos de Hype ───
+        // Capturamos todas las respuestas a endpoints clave: /validate, /verify, /confirm.
+        // El buffer se incluye en logs de error para identificar qué dijo el servidor.
+        const NET_RX = /\/(validate|verify|confirm|verifycode|account)/i;
+        const onResponse = async (resp) => {
+            try {
+                const url = resp.url();
+                if (!NET_RX.test(url)) return;
+                let bodySnippet = '';
+                try { bodySnippet = (await resp.text()).slice(0, 300); } catch {}
+                const entryNet = {
+                    t: Date.now() - startMs,
+                    url: url.replace(/^https?:\/\/[^/]+/, ''),
+                    status: resp.status(),
+                    ok: resp.ok(),
+                    body: bodySnippet,
+                };
+                netLog.push(entryNet);
+                if (!resp.ok() || /"Success"\s*:\s*false|error\s*interno|internal\s*error/i.test(bodySnippet)) {
+                    fastify.log.warn({ pin: pin.slice(0, 8), traceId, ...entryNet }, 'Respuesta de red sospechosa');
+                }
+            } catch {}
+        };
+        const onPageError = (err) => {
+            fastify.log.warn({ pin: pin.slice(0, 8), traceId, err: err && err.message }, 'PageError JS en Hype');
+        };
+        const onConsole = (msg) => {
+            try {
+                if (msg.type() === 'error') {
+                    const txt = msg.text().slice(0, 200);
+                    if (/error|fail|interno/i.test(txt)) {
+                        fastify.log.warn({ pin: pin.slice(0, 8), traceId, consoleErr: txt }, 'Console error en Hype');
+                    }
+                }
+            } catch {}
+        };
+        page.on('response', onResponse);
+        page.on('pageerror', onPageError);
+        page.on('console', onConsole);
+        detachNet = () => {
+            try { page.off('response', onResponse); } catch {}
+            try { page.off('pageerror', onPageError); } catch {}
+            try { page.off('console', onConsole); } catch {}
+        };
 
         // ─── PASO 1: Ingresar PIN + validar ───
-        const stepLog = (step) => fastify.log.info({ pin: pin.slice(0, 8), step, ms: Date.now() - startMs }, 'step');
+        const stepLog = (step) => fastify.log.info({ pin: pin.slice(0, 8), traceId, step, ms: Date.now() - startMs }, 'step');
 
         // Captura ligera del estado de la página para diagnosticar fallos de Hype.
         // Solo lectura DOM + URL — no afecta el flujo. Se ejecuta cuando algo no salió como se esperaba.
@@ -405,6 +467,30 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
 
         stepLog('pin-input-wait');
         await page.waitForSelector('#pininput', { state: 'visible', timeout: 10000 });
+
+        // Snapshot ANTES de tocar nada: ¿la página llegó del pool ya con error visible?
+        // Si "error interno" aparece aquí, el problema es del pre-warming, no del bot.
+        try {
+            const pre = await page.evaluate(() => {
+                const txt = (document.body && document.body.innerText) ? document.body.innerText.slice(0, 300).replace(/\s+/g, ' ').trim() : '';
+                const btn = document.querySelector('#btn-validate');
+                const hasErrInternoVisible = /error\s*interno|internal\s*error|intente\s*nuevamente/i.test(txt);
+                return {
+                    url: location.href,
+                    textSnippet: txt.slice(0, 200),
+                    hasErrInternoVisible,
+                    btnDisabled: btn ? btn.disabled : null,
+                    pinInputVal: (document.querySelector('#pininput') || {}).value || '',
+                    grecaptchaReady: typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.execute === 'function',
+                    cookies: document.cookie.length,
+                };
+            });
+            fastify.log.info({ pin: pin.slice(0, 8), traceId, where: 'pre-pin', ...pre }, 'Estado pre-PIN');
+            if (pre.hasErrInternoVisible) {
+                fastify.log.warn({ pin: pin.slice(0, 8), traceId, pageId: entry.id, useCount: entry.useCount }, 'Página venía del pool con "error interno" YA visible');
+            }
+        } catch {}
+
         await page.evaluate((p) => {
             const el = document.querySelector('#pininput');
             const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -464,6 +550,20 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
         const doValidateAndWaitForm = async (label) => {
+            // Snapshot DOM justo antes de clickear validate (¿ya hay error interno latente?)
+            try {
+                const preClick = await page.evaluate(() => {
+                    const txt = (document.body && document.body.innerText) ? document.body.innerText.slice(0, 250).replace(/\s+/g, ' ').trim() : '';
+                    const btn = document.querySelector('#btn-validate');
+                    return {
+                        hasErrIntVisible: /error\s*interno|internal\s*error|intente\s*nuevamente/i.test(txt),
+                        textSnippet: txt.slice(0, 150),
+                        btnDisabled: btn ? btn.disabled : null,
+                        pinVal: (document.querySelector('#pininput') || {}).value || '',
+                    };
+                });
+                fastify.log.info({ pin: pin.slice(0, 8), traceId, where: `${label}-pre-click`, ...preClick }, 'Estado pre-click validate');
+            } catch {}
             // Estrategia: click + carrera entre (form aparece) vs (/validate responde con error).
             // El form es la fuente de verdad del éxito; /validate solo nos sirve para fail-fast en error explícito.
             // No bloqueamos hasta 12s al /validate cuando el form ya podría estar visible.
@@ -496,6 +596,7 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
 
             await page.evaluate(() => document.querySelector('#btn-validate').click());
             stepLog(`${label}-validate-clicked`);
+            const validateClickAt = Date.now();
 
             // Carrera: form aparece (éxito) vs /validate trae error (fail-fast)
             const formPromise = page.waitForSelector('#GameAccountId', { state: 'visible', timeout: 8000 })
@@ -575,7 +676,12 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
             lowerText.includes('try again')
         )) {
             shouldRecycle = true;
-            fastify.log.warn({ pin: pin.slice(0, 8) }, 'Hype mostró error interno en validate — abortando sin reintentar (PIN intacto)');
+            fastify.log.warn({
+                pin: pin.slice(0, 8), traceId,
+                pageId: entry.id, useCount: entry.useCount,
+                pageAgeMs: Date.now() - (entry.warmedAt || entry.createdAt || Date.now()),
+                netLog,
+            }, 'Hype mostró error interno en validate — abortando sin reintentar (PIN intacto)');
             return {
                 success: false,
                 error: ErrorType.PAGE_ERROR,
@@ -639,6 +745,12 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         if (!v.formAppeared) {
             // PIN nunca se confirmó → return_pin: true (jadhstore lo devuelve al stock)
             await capturePageState('form-no-aparecio');
+            fastify.log.warn({
+                pin: pin.slice(0, 8), traceId,
+                pageId: entry.id, useCount: entry.useCount,
+                pageAgeMs: Date.now() - (entry.warmedAt || entry.createdAt || Date.now()),
+                netLog,
+            }, 'Form no apareció — dumping network log');
             shouldRecycle = true;
             return {
                 success: false,
@@ -1002,6 +1114,7 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
             product_name: '', nickname: '', diamonds: 0,
         };
     } finally {
+        try { detachNet(); } catch {}
         if (entry) {
             if (shouldRecycle) {
                 recyclePage(entry);
