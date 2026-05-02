@@ -294,6 +294,10 @@ function recyclePage(entry) {
     // Fire-and-forget: recarga la página en background y la devuelve al pool
     (async () => {
         try {
+            // SAFETY: navegar a about:blank PRIMERO mata cualquier JS, request pendiente,
+            // o handler queued en la página actual. Crítico para garantizar que tras
+            // return_pin:true ningún click/submit residual pueda llegar a /validate o /confirm.
+            try { await entry.page.goto('about:blank', { timeout: 5000 }); } catch {}
             await entry.page.goto(CONFIG.REDEEM_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
             await entry.page.waitForSelector('#pininput', { state: 'visible', timeout: 15000 });
 
