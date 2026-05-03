@@ -6,3 +6,12 @@ debug_*.png
 node_modules/
 .venv/
 venv/
+
+LOCAL_FILES.md
+diagnose*.js
+hype-trace.json
+hypetest.sh
+inspect-hype-flow.js
+local-bot.log
+.test_*
+.tmp_*
