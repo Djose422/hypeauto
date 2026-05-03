@@ -281,8 +281,19 @@ async function fillPool() {
 }
 
 async function acquirePage() {
-    let entry = pagePool.shift();
-    if (entry) {
+    // Edad máxima en idle: si una página lleva >30s sin usarse, sus conexiones
+    // keep-alive con Hype/reCAPTCHA pueden estar muertas (ERR_CONNECTION_CLOSED).
+    // Descartar y crear nueva. Confirmado en prod: 9/9 fallos de "error interno"
+    // tenían pageAgeMs entre 110s y 258s; test local con 200 PINs y pageAgeMs <4s = 0 errores.
+    const MAX_IDLE_MS = 30000;
+    while (pagePool.length > 0) {
+        const entry = pagePool.shift();
+        const ageMs = Date.now() - (entry.warmedAt || entry.createdAt || Date.now());
+        if (ageMs > MAX_IDLE_MS) {
+            fastify.log.info({ pageId: entry.id, ageMs, useCount: entry.useCount }, 'Página descartada por edad');
+            try { await entry.context.close(); } catch {}
+            continue;
+        }
         try {
             await entry.page.evaluate(() => true);
             return entry;
@@ -468,28 +479,9 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         stepLog('pin-input-wait');
         await page.waitForSelector('#pininput', { state: 'visible', timeout: 10000 });
 
-        // Snapshot ANTES de tocar nada: ¿la página llegó del pool ya con error visible?
-        // Si "error interno" aparece aquí, el problema es del pre-warming, no del bot.
-        try {
-            const pre = await page.evaluate(() => {
-                const txt = (document.body && document.body.innerText) ? document.body.innerText.slice(0, 300).replace(/\s+/g, ' ').trim() : '';
-                const btn = document.querySelector('#btn-validate');
-                const hasErrInternoVisible = /error\s*interno|internal\s*error|intente\s*nuevamente/i.test(txt);
-                return {
-                    url: location.href,
-                    textSnippet: txt.slice(0, 200),
-                    hasErrInternoVisible,
-                    btnDisabled: btn ? btn.disabled : null,
-                    pinInputVal: (document.querySelector('#pininput') || {}).value || '',
-                    grecaptchaReady: typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.execute === 'function',
-                    cookies: document.cookie.length,
-                };
-            });
-            fastify.log.info({ pin: pin.slice(0, 8), traceId, where: 'pre-pin', ...pre }, 'Estado pre-PIN');
-            if (pre.hasErrInternoVisible) {
-                fastify.log.warn({ pin: pin.slice(0, 8), traceId, pageId: entry.id, useCount: entry.useCount }, 'Página venía del pool con "error interno" YA visible');
-            }
-        } catch {}
+        // Pequeño margen tras adquirir la página antes de tocar inputs (~150ms).
+        // Evita race entre fin de hidratación del SDK reCAPTCHA y nuestro fill.
+        await sleep(150);
 
         await page.evaluate((p) => {
             const el = document.querySelector('#pininput');
@@ -550,20 +542,9 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
         const doValidateAndWaitForm = async (label) => {
-            // Snapshot DOM justo antes de clickear validate (¿ya hay error interno latente?)
-            try {
-                const preClick = await page.evaluate(() => {
-                    const txt = (document.body && document.body.innerText) ? document.body.innerText.slice(0, 250).replace(/\s+/g, ' ').trim() : '';
-                    const btn = document.querySelector('#btn-validate');
-                    return {
-                        hasErrIntVisible: /error\s*interno|internal\s*error|intente\s*nuevamente/i.test(txt),
-                        textSnippet: txt.slice(0, 150),
-                        btnDisabled: btn ? btn.disabled : null,
-                        pinVal: (document.querySelector('#pininput') || {}).value || '',
-                    };
-                });
-                fastify.log.info({ pin: pin.slice(0, 8), traceId, where: `${label}-pre-click`, ...preClick }, 'Estado pre-click validate');
-            } catch {}
+            // Pequeño margen previo al click (~100ms): da tiempo al SDK de reCAPTCHA
+            // a registrar el token en el cliente Hype antes de disparar /validate.
+            await sleep(100);
             // Estrategia: click + carrera entre (form aparece) vs (/validate responde con error).
             // El form es la fuente de verdad del éxito; /validate solo nos sirve para fail-fast en error explícito.
             // No bloqueamos hasta 12s al /validate cuando el form ya podría estar visible.
