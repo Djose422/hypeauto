@@ -479,10 +479,6 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         stepLog('pin-input-wait');
         await page.waitForSelector('#pininput', { state: 'visible', timeout: 10000 });
 
-        // Pequeño margen tras adquirir la página antes de tocar inputs (~150ms).
-        // Evita race entre fin de hidratación del SDK reCAPTCHA y nuestro fill.
-        await sleep(150);
-
         await page.evaluate((p) => {
             const el = document.querySelector('#pininput');
             const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -542,9 +538,6 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
         const doValidateAndWaitForm = async (label) => {
-            // Pequeño margen previo al click (~100ms): da tiempo al SDK de reCAPTCHA
-            // a registrar el token en el cliente Hype antes de disparar /validate.
-            await sleep(100);
             // Estrategia: click + carrera entre (form aparece) vs (/validate responde con error).
             // El form es la fuente de verdad del éxito; /validate solo nos sirve para fail-fast en error explícito.
             // No bloqueamos hasta 12s al /validate cuando el form ya podría estar visible.
