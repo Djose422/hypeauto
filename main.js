@@ -538,6 +538,10 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
         const doValidateAndWaitForm = async (label) => {
+            // Pequeño margen previo al click (~100ms): da tiempo a Chromium a detectar
+            // sockets keep-alive muertos y renegociar antes de disparar /validate.
+            // Sin esto reaparece "error interno" con ERR_CONNECTION_CLOSED (~1.8% de canjes).
+            await sleep(100);
             // Estrategia: click + carrera entre (form aparece) vs (/validate responde con error).
             // El form es la fuente de verdad del éxito; /validate solo nos sirve para fail-fast en error explícito.
             // No bloqueamos hasta 12s al /validate cuando el form ya podría estar visible.
