@@ -213,10 +213,20 @@ async function createWarmedPage() {
 
     // Block unnecessary resources
     await context.route('**/*', async (route) => {
-        const url = route.request().url();
-        const type = route.request().resourceType();
+        const req = route.request();
+        const url = req.url();
+        const type = req.resourceType();
 
         if (url.includes('hype.games') || url.includes('recaptcha') || url.includes('gstatic.com')) {
+            // Forzar Connection: close en /validate (no en /account/validate) para evitar
+            // que Chromium reutilice un socket keep-alive ya cerrado por el peer y dispare
+            // ERR_CONNECTION_CLOSED → "error interno". Reemplaza el sleep(100) determinista.
+            // Costo: handshake TLS extra (~30-80ms), pero predecible y elimina la carrera.
+            if (url.includes('/validate') && !url.includes('account')) {
+                const headers = { ...req.headers(), connection: 'close' };
+                await route.continue({ headers });
+                return;
+            }
             await route.continue();
             return;
         }
@@ -538,10 +548,9 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
         const doValidateAndWaitForm = async (label) => {
-            // Pequeño margen previo al click (~100ms): da tiempo a Chromium a detectar
-            // sockets keep-alive muertos y renegociar antes de disparar /validate.
-            // Sin esto reaparece "error interno" con ERR_CONNECTION_CLOSED (~1.8% de canjes).
-            await sleep(100);
+            // NOTA: el sleep(100) previo se reemplazó por forzar `Connection: close` en /validate
+            // a nivel route handler (ver createWarmedPage). Esto evita la carrera con sockets
+            // keep-alive muertos de forma determinista, sin retrasar el click.
             // Estrategia: click + carrera entre (form aparece) vs (/validate responde con error).
             // El form es la fuente de verdad del éxito; /validate solo nos sirve para fail-fast en error explícito.
             // No bloqueamos hasta 12s al /validate cuando el form ya podría estar visible.
