@@ -359,7 +359,7 @@ async function automateRedeem(pin, gameAccountId) {
             success: false,
             error: ErrorType.UNKNOWN,
             error_message: err && err.message ? err.message : String(err),
-            return_pin: false,
+            return_pin: true,
             product_name: '', nickname: '', diamonds: 0,
         };
     }
@@ -538,11 +538,11 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
         // El PIN sólo se consume en el paso /confirm (más adelante), nunca aquí.
 
         const doValidateAndWaitForm = async (label) => {
-            // Margen previo al click (~150ms): da tiempo a Chromium a detectar
+            // Margen previo al click (~200ms): da tiempo a Chromium a detectar
             // sockets keep-alive muertos y renegociar antes de disparar /validate.
             // Sin esto reaparece "error interno" con ERR_CONNECTION_CLOSED y QUEMA pines.
             // (Probamos 100ms y reemplazo por Connection:close, ambos provocaron quemados.)
-            await sleep(150);
+            await sleep(200);
             // Estrategia: click + carrera entre (form aparece) vs (/validate responde con error).
             // El form es la fuente de verdad del éxito; /validate solo nos sirve para fail-fast en error explícito.
             // No bloqueamos hasta 12s al /validate cuando el form ya podría estar visible.
@@ -977,11 +977,13 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
 
         if (!confirmOk && !confirmBody) {
             shouldRecycle = true;
+            // No llegamos a enviar /confirm exitosamente → PIN no consumido upstream.
+            // Política: solo quemar si Hype dice explícitamente "PIN ya canjeado".
             return {
                 success: false,
                 error: ErrorType.UNKNOWN,
                 error_message: 'No se pudo enviar el formulario de canje',
-                return_pin: false, // PIN posiblemente consumido
+                return_pin: true,
                 product_name: productName, nickname, diamonds: 0,
             };
         }
@@ -999,11 +1001,16 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
                 try {
                     const json = JSON.parse(confirmBody);
                     if (json && typeof json === 'object' && json.Success === false) {
+                        const errType = classifyError('confirm', json.Message);
+                        // Política: solo quemar si Hype dice explícitamente que el PIN ya estaba canjeado.
+                        // Cualquier otro error (ej. "error interno" genérico) → devolver al stock,
+                        // aunque exista riesgo de que Hype lo haya procesado upstream.
+                        const burnPin = (errType === ErrorType.PIN_ALREADY_USED);
                         return {
                             success: false,
-                            error: classifyError('confirm', json.Message),
+                            error: errType,
                             error_message: json.Message || 'Error del servidor',
-                            return_pin: false,
+                            return_pin: !burnPin,
                             product_name: productName, nickname, diamonds: 0,
                         };
                     }
@@ -1075,11 +1082,14 @@ async function _automateRedeemImpl(pin, gameAccountId, startMs) {
 
         // Tras 3 reintentos (6s extra) el formulario sigue visible
         fastify.log.warn({ pin: pin.slice(0, 8) }, 'Safety net agotado — formulario sigue visible');
+        // Política: como no tenemos confirmación explícita de "PIN ya canjeado",
+        // devolvemos el pin al stock (riesgo aceptado: si Hype lo procesó upstream,
+        // el próximo cliente lo intentará y fallará con PIN_ALREADY_USED).
         return {
             success: false,
             error: ErrorType.UNKNOWN,
             error_message: 'Formulario sigue visible tras safety net - canje no completado',
-            return_pin: false,
+            return_pin: true,
             product_name: productName, nickname, diamonds: 0,
         };
 
